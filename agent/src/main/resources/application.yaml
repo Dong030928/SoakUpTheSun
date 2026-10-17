@@ -39,13 +39,15 @@ suts:
     embedding-host: ${AI_EMBEDDING_HOST:https://api.siliconflow.cn/v1}
     embedding-api-key: ${AI_EMBEDDING_API_KEY:}
     embedding-model-name: ${AI_EMBEDDING_MODEL_NAME:}
+    embedding-timeout: ${AI_EMBEDDING_TIMEOUT:10000}
+    embedding-enabled: ${AI_EMBEDDING_ENABLED:true}
     # 其他设置
-    timeout: 60000
+    timeout: ${AI_TIMEOUT:60000}
     temperature: 0.5
     # 向量维度
     vector:
-      # 向量维度，DeepSeek 是 1024
-      dimension: 1024
+      # 必须与当前 Embedding 模型及既有 Redis 索引一致
+      dimension: ${AI_VECTOR_DIMENSION:1024}
     chat:
       # 用户上下文长度
       max-context-char-limit: 4000

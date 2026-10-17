@@ -50,4 +50,13 @@ public class AiConfig {
      * 向量模型名称
      */
     private String embeddingModelName;
+
+    private int embeddingTimeout = 10000;
+    private boolean embeddingEnabled = true;
+    private Vector vector = new Vector();
+
+    @Data
+    public static class Vector {
+        private int dimension = 1024;
+    }
 }

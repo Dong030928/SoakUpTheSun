@@ -21,6 +21,8 @@ public class UploadPictureAnalysisEvent {
      * 用户id
      */
     private Long userId;
+    /** Capture/request time, preserved across MQ retries so stale analyses cannot overwrite newer ones. */
+    private Long requestedAt;
 
     /**
      * 图片 ID
