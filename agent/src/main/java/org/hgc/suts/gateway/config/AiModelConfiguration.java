@@ -1,6 +1,7 @@
 package org.hgc.suts.gateway.config;
 
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.ToolCallingAdvisor;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.deepseek.DeepSeekChatModel;
 import org.springframework.ai.deepseek.DeepSeekChatOptions;
@@ -8,6 +9,7 @@ import org.springframework.ai.deepseek.api.DeepSeekApi;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.openai.OpenAiEmbeddingModel;
 import org.springframework.ai.openai.OpenAiEmbeddingOptions;
+import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.retry.RetryPolicy;
@@ -20,7 +22,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Duration;
 
-/** Bridges existing suts.ai properties to Spring AI, without changing the business chain. */
+/** Bridges existing suts.ai properties to Spring AI and bounds the tool execution loop. */
 @Configuration(proxyBeanMethods = false)
 public class AiModelConfiguration {
     @Bean
@@ -45,7 +47,12 @@ public class AiModelConfiguration {
 
     @Bean
     public ChatClient agentChatClient(ChatModel agentChatModel) {
-        return ChatClient.builder(agentChatModel).build();
+        var tools = ToolCallingManager.builder().maxCallsPerTool(2).maxTotalToolCalls(2)
+                .resolutionFallbackEnabled(false)
+                .toolExecutionExceptionProcessor(ex -> "工具参数无效或执行被拒绝，请检查参数，勿假定执行成功。")
+                .build();
+        return ChatClient.builder(agentChatModel)
+                .defaultAdvisors(ToolCallingAdvisor.builder().toolCallingManager(tools).build()).build();
     }
 
     @Bean

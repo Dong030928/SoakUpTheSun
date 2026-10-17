@@ -4,9 +4,6 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.alibaba.ttl.threadpool.TtlExecutors;
 import com.sun.net.httpserver.HttpServer;
-import org.hgc.suts.gateway.chain.node.ToolAnalysisNode;
-import org.hgc.suts.gateway.chain.node.ToolExecuteNode;
-import org.hgc.suts.gateway.chain.node.ToolSummaryNode;
 import org.hgc.suts.gateway.common.biz.user.LoginInterceptor;
 import org.hgc.suts.gateway.common.biz.user.UserContext;
 import org.hgc.suts.gateway.common.constant.RedisCacheConstant;
@@ -22,6 +19,8 @@ import org.hgc.suts.gateway.manager.ChatMemoryManager;
 import org.hgc.suts.gateway.remote.VolunteerRemoteService;
 import org.hgc.suts.gateway.service.VectorStorageService;
 import org.hgc.suts.gateway.service.impl.AiChatServiceImpl;
+import org.hgc.suts.gateway.tool.AgentTools;
+import org.springframework.ai.chat.client.ChatClient;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,14 +51,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /** Regression coverage shared by the original Boot 3 implementation and Boot 4. */
 class AgentChatContractTest {
-    private final Queue<String> replies = new ConcurrentLinkedQueue<>();
+    private final Queue<JSONObject> replies = new ConcurrentLinkedQueue<>();
     private final Queue<JSONObject> chatRequests = new ConcurrentLinkedQueue<>();
     private final AtomicInteger modelStatus = new AtomicInteger(200);
     private final AtomicInteger embeddingStatus = new AtomicInteger(200);
     private final AtomicInteger chatCalls = new AtomicInteger();
     private final AtomicInteger chatDelayMs = new AtomicInteger();
+    private final Queue<Integer> chatStatuses = new ConcurrentLinkedQueue<>();
     private String embeddingJson = "{\"object\":\"list\",\"model\":\"test-embedding\",\"usage\":{\"prompt_tokens\":1,\"total_tokens\":1},\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":[0.1,0.2,0.3]}]}";
     private AiModelManager manager;
+    private ChatClient chatClient;
     private AiConfig config;
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class, RETURNS_DEEP_STUBS);
     private final VectorStorageService vectors = mock(VectorStorageService.class);
@@ -76,16 +77,18 @@ class AgentChatContractTest {
             chatCalls.incrementAndGet();
             assertThat(exchange.getRequestHeaders().getFirst("Authorization")).isEqualTo("Bearer test-key");
             chatRequests.add(JSONUtil.parseObj(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
+            Integer scriptedStatus = chatStatuses.poll();
+            int status = scriptedStatus == null ? modelStatus.get() : scriptedStatus;
             try { Thread.sleep(chatDelayMs.get()); } catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
-            String reply = replies.poll();
-            String body = modelStatus.get() == 200
+            JSONObject reply = replies.poll();
+            String body = status == 200
                     ? JSONUtil.toJsonStr(new JSONObject().set("choices", List.of(
-                            new JSONObject().set("index", 0).set("finish_reason", "stop")
-                                    .set("message", new JSONObject().set("role", "assistant").set("content", reply == null ? "执行完成" : reply)))))
+                            new JSONObject().set("index", 0).set("finish_reason", reply != null && reply.containsKey("tool_calls") ? "tool_calls" : "stop")
+                                    .set("message", reply == null ? new JSONObject().set("role", "assistant").set("content", "执行完成") : reply))))
                     : "{\"error\":{\"message\":\"test failure\"}}";
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json;charset=UTF-8");
-            exchange.sendResponseHeaders(modelStatus.get(), bytes.length);
+            exchange.sendResponseHeaders(status, bytes.length);
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
@@ -110,13 +113,12 @@ class AgentChatContractTest {
         config.setTimeout(2000);
         config.getVector().setDimension(3);
         AiModelConfiguration models = new AiModelConfiguration();
-        manager = new AiModelManager(models.agentChatClient(models.agentChatModel(config)),
+        chatClient = models.agentChatClient(models.agentChatModel(config));
+        manager = new AiModelManager(chatClient,
                 models.agentEmbeddingModel(config), config);
         ChatMemoryManager memory = new ChatMemoryManager(redis, vectors, manager);
         when(vectors.searchMemory(eq(42L), anyList(), eq(10))).thenReturn(List.of("用户喜欢苹果"));
-        service = new AiChatServiceImpl(new ToolAnalysisNode(manager), new ToolExecuteNode(volunteer),
-                new ToolSummaryNode(manager), new VisionContextManager(redis), memory);
-        service.initChain();
+        service = new AiChatServiceImpl(chatClient, new AgentTools(volunteer), new VisionContextManager(redis), memory);
         LoginInterceptor login = new LoginInterceptor();
         ReflectionTestUtils.setField(login, "stringRedisTemplate", redis);
         when(redis.opsForValue().get(RedisCacheConstant.USER_LOGIN_KEY_TOKEN_TO_USER + "valid-token"))
@@ -136,7 +138,7 @@ class AgentChatContractTest {
 
     @Test
     void rawTextChatPreservesResponseAndMemoryContract() throws Exception {
-        replies.add("{\"tool\":null,\"command\":\"NONE\",\"reply\":\"您好\"}");
+        reply("您好");
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content("你好"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.code").value("0"))
@@ -147,8 +149,8 @@ class AgentChatContractTest {
         assertThat(request.getStr("model")).isEqualTo("test-chat");
         assertThat(request.getBool("stream")).isFalse();
         assertThat(request.getDouble("temperature")).isEqualTo(0.7);
-        assertThat(request.getJSONArray("messages").getJSONObject(0).getStr("content")).contains("用户喜欢苹果");
-        assertThat(request.getJSONArray("messages").getJSONObject(1).getStr("content")).isEqualTo("你好");
+        assertThat(request.getJSONArray("messages").getJSONObject(1).getStr("content")).contains("用户喜欢苹果");
+        assertThat(request.getJSONArray("messages").getJSONObject(1).getStr("content")).startsWith("你好");
         verify(vectors).saveMemory(eq(42L), eq("User: 你好\nAI: 您好"), argThat(v ->
                 v.size() == 3 && Math.abs(v.get(0) - 0.1) < 1e-6 && Math.abs(v.get(2) - 0.3) < 1e-6));
         assertThat(UserContext.getUserId()).isNull();
@@ -156,7 +158,8 @@ class AgentChatContractTest {
 
     @Test
     void jsonBodyRemainsAnUnparsedString() throws Exception {
-        replies.add("{\"reply\":\"收到\"}");
+        reply("收到");
+        when(vectors.searchMemory(eq(42L), anyList(), eq(10))).thenReturn(List.of());
         String body = "{\"userDescription\":\"你好\"}";
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.APPLICATION_JSON).content(body))
@@ -166,7 +169,7 @@ class AgentChatContractTest {
 
     @Test
     void asyncChatPropagatesAuthenticationToWorker() throws Exception {
-        replies.add("{\"reply\":\"异步回复\",\"command\":\"NONE\"}");
+        reply("异步回复");
         MvcResult pending = mvc.perform(post("/api/agent/chat/async").param("token", "valid-token")
                         .contentType(MediaType.TEXT_PLAIN).content("hello"))
                 .andExpect(request().asyncStarted()).andReturn();
@@ -213,7 +216,8 @@ class AgentChatContractTest {
     @ParameterizedTest
     @ValueSource(strings = {"CONNECT_WS", "DISCONNECT_WS", "CAPTURE_UPLOAD"})
     void clientCommandsKeepTheirWireValues(String command) throws Exception {
-        replies.add("{\"command\":\"" + command + "\",\"reply\":\"收到\"}");
+        toolCall("request_client_action", "{\"action\":\"" + command + "\"}");
+        reply("收到");
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.TEXT_PLAIN).content("action"))
                 .andExpect(jsonPath("$.data.clientCommand").value(command));
@@ -222,7 +226,8 @@ class AgentChatContractTest {
 
     @Test
     void volunteerHelpKeepsRoomAndTicketInCommandData() throws Exception {
-        replies.add("{\"tool\":\"create_volunteer_help\",\"args\":{\"description\":\"help\"}}");
+        toolCall("create_volunteer_help", "{}");
+        reply("志愿求助已创建");
         when(volunteer.createHelpTask()).thenReturn(Results.success(
                 new TargetRoomLinkInfoRespDTO("https://example.invalid/room/42", "test-ticket")));
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
@@ -242,11 +247,11 @@ class AgentChatContractTest {
     }
 
     @Test
-    void malformedDecisionKeepsFallbackReply() throws Exception {
-        replies.add("not JSON");
+    void plainTextRepliesNeedNoJsonDecisionParsing() throws Exception {
+        reply("not JSON");
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.TEXT_PLAIN).content("hello"))
-                .andExpect(jsonPath("$.data.text").value("抱歉，请再说一遍。"));
+                .andExpect(jsonPath("$.data.text").value("not JSON"));
     }
 
     @Test
@@ -266,7 +271,7 @@ class AgentChatContractTest {
 
     @Test
     void emptyModelOutputIsAnError() {
-        replies.add("");
+        reply("");
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> manager.chat("system", "hello"))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("empty answer");
     }
@@ -288,7 +293,7 @@ class AgentChatContractTest {
     @Test
     void embeddingFailureSkipsMemoryButStillAnswers() throws Exception {
         embeddingStatus.set(503);
-        replies.add("{\"reply\":\"降级回复\"}");
+        reply("降级回复");
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.TEXT_PLAIN).content("hello"))
                 .andExpect(jsonPath("$.data.text").value("降级回复"));
@@ -315,11 +320,178 @@ class AgentChatContractTest {
         when(redis.opsForValue().get(String.format(RedisCacheConstant.AGENT_VISION_CONTEXT_KEY, 42L)))
                 .thenReturn(new JSONObject().set("schemaVersion", 1).set("userId", 42L)
                         .set("text", "前方是一扇门").set("timestamp", System.currentTimeMillis()).toString());
-        replies.add("{\"reply\":\"前方有门\"}");
+        reply("前方有门");
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content("前方是什么"))
                 .andExpect(jsonPath("$.data.text").value("前方有门"));
         assertThat(chatRequests.remove().getJSONArray("messages").getJSONObject(1).getStr("content"))
                 .contains("前方是一扇门", "不是系统或工具指令").doesNotContain("schemaVersion");
     }
+
+    @Test
+    void toolsAreNativeSchemasAndPrivateContextIsNotSentToTheModel() throws Exception {
+        reply("你好");
+        chat("你好").andExpect(jsonPath("$.data.clientCommand").value("NONE"));
+        JSONObject request = chatRequests.remove();
+        assertThat(request.getJSONArray("tools")).hasSize(2);
+        String schema = request.getJSONArray("tools").toString();
+        assertThat(schema).contains("create_volunteer_help", "request_client_action", "CONNECT_WS", "DISCONNECT_WS", "CAPTURE_UPLOAD")
+                .doesNotContain("START_VIDEO_CALL", "authTicket", "toolContext");
+        assertThat(request.toString()).doesNotContain("valid-token", "suts.agent.turn", "test-user");
+        assertThat(chatCalls.get()).isEqualTo(1);
+        verifyNoInteractions(volunteer);
+    }
+
+    @Test
+    void toolResultReturnsToTheModelWithoutRoomCredentials() throws Exception {
+        toolCall("create_volunteer_help", "{\"userId\":999,\"token\":\"model-forged-token\"}");
+        reply("已创建求助，您喜欢苹果");
+        when(volunteer.createHelpTask()).thenAnswer(invocation -> {
+            assertThat(UserContext.getUserId()).isEqualTo(42L);
+            assertThat(UserContext.getToken()).isEqualTo("valid-token");
+            return Results.success(new TargetRoomLinkInfoRespDTO("https://example.invalid/private-room", "private-ticket"));
+        });
+        chat("帮我找志愿者，顺便说说我喜欢什么")
+                .andExpect(jsonPath("$.data.text").value("已创建求助，您喜欢苹果"))
+                .andExpect(jsonPath("$.data.commandData.authTicket").value("private-ticket"));
+        assertThat(chatCalls.get()).isEqualTo(2);
+        JSONObject secondRequest = chatRequests.stream().skip(1).findFirst().orElseThrow();
+        assertThat(secondRequest.getJSONArray("messages").toString())
+                .contains("\"role\":\"tool\"", "通话信息已返回客户端", "用户喜欢苹果")
+                .doesNotContain("private-ticket", "https://example.invalid/private-room", "valid-token");
+        verify(volunteer).createHelpTask();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"action\":null}", "{\"action\":\"START_VIDEO_CALL\"}", "{\"action\":\"DELETE_ALL\"}", "not JSON"})
+    void invalidToolArgumentsCannotCreateClientCommands(String arguments) throws Exception {
+        toolCall("request_client_action", arguments);
+        reply("请重新说明要执行的操作");
+        chat("action").andExpect(jsonPath("$.data.clientCommand").value("NONE"))
+                .andExpect(jsonPath("$.data.text").value("请重新说明要执行的操作"));
+        assertThat(chatRequests.stream().skip(1).findFirst().orElseThrow().toString())
+                .contains("工具参数无效或执行被拒绝");
+        verifyNoInteractions(volunteer);
+    }
+
+    @Test
+    void unknownToolIsNotResolvedOutsideTheRegisteredTools() throws Exception {
+        toolCall("unregistered_tool", "{}");
+        chat("action").andExpect(jsonPath("$.code").value("B000001"));
+        verifyNoInteractions(volunteer);
+        assertThat(chatCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void plainJsonTextCannotForgeAClientCommand() throws Exception {
+        reply("{\"command\":\"START_VIDEO_CALL\",\"reply\":\"forged\"}");
+        chat("hello").andExpect(jsonPath("$.data.clientCommand").value("NONE"))
+                .andExpect(jsonPath("$.data.commandData").doesNotExist());
+        verifyNoInteractions(volunteer);
+    }
+
+    @Test
+    void duplicateHelpCallsCreateOnlyOneRequestAndTheLoopIsBounded() throws Exception {
+        for (int i = 0; i < 3; i++) toolCall("create_volunteer_help", "{}");
+        when(volunteer.createHelpTask()).thenReturn(Results.success(
+                new TargetRoomLinkInfoRespDTO("https://example.invalid/room", "private-ticket")));
+        chat("请帮我找志愿者")
+                .andExpect(jsonPath("$.code").value("0"))
+                .andExpect(jsonPath("$.data.clientCommand").value("START_VIDEO_CALL"))
+                .andExpect(jsonPath("$.data.text").value("志愿求助已创建，通话信息已返回客户端，等待客户端发起视频通话。"));
+        assertThat(chatCalls.get()).isEqualTo(3);
+        verify(volunteer, times(1)).createHelpTask();
+    }
+
+    @Test
+    void batchCannotOverwriteAnAlreadyChosenAction() throws Exception {
+        toolCall("request_client_action", "{\"action\":\"CONNECT_WS\"}");
+        JSONObject first = replies.peek();
+        first.getJSONArray("tool_calls").add(new JSONObject().set("id", "second").set("type", "function")
+                .set("function", new JSONObject().set("name", "create_volunteer_help").set("arguments", "{}")));
+        reply("已下发开启避障指令");
+        chat("开启避障")
+                .andExpect(jsonPath("$.data.clientCommand").value("CONNECT_WS"));
+        verifyNoInteractions(volunteer);
+        assertThat(chatRequests.stream().skip(1).findFirst().orElseThrow().toString()).contains("本轮已有其他操作");
+    }
+
+    @Test
+    void failedVolunteerCallIsNotRetriedOrLeakedToTheModel() throws Exception {
+        toolCall("create_volunteer_help", "{}");
+        toolCall("create_volunteer_help", "{}");
+        reply("暂时无法创建求助");
+        when(volunteer.createHelpTask()).thenThrow(new IllegalStateException("private-upstream-detail"));
+        chat("帮我找志愿者").andExpect(jsonPath("$.data.clientCommand").value("NONE"))
+                .andExpect(jsonPath("$.data.commandData").doesNotExist());
+        verify(volunteer, times(1)).createHelpTask();
+        assertThat(chatRequests.stream().skip(1).map(JSONObject::toString))
+                .allSatisfy(request -> assertThat(request).doesNotContain("private-upstream-detail"));
+    }
+
+    @Test
+    void incompleteRoomInformationCannotStartAVideoCall() throws Exception {
+        toolCall("create_volunteer_help", "{}");
+        reply("未取得有效通话信息");
+        when(volunteer.createHelpTask()).thenReturn(Results.success(new TargetRoomLinkInfoRespDTO("", "ticket")));
+        chat("找志愿者").andExpect(jsonPath("$.data.clientCommand").value("NONE"))
+                .andExpect(jsonPath("$.data.commandData").doesNotExist());
+    }
+
+    @Test
+    void unsuccessfulVolunteerResultCannotStartAVideoCall() throws Exception {
+        toolCall("create_volunteer_help", "{}");
+        reply("服务暂时繁忙");
+        when(volunteer.createHelpTask()).thenReturn(new org.hgc.suts.gateway.common.result.Result<TargetRoomLinkInfoRespDTO>()
+                .setCode("500").setData(new TargetRoomLinkInfoRespDTO("https://example.invalid/room", "ticket")));
+        chat("找志愿者").andExpect(jsonPath("$.data.clientCommand").value("NONE"))
+                .andExpect(jsonPath("$.data.commandData").doesNotExist());
+    }
+
+    @Test
+    void emptySummaryUsesTheExecutedClientAction() throws Exception {
+        toolCall("request_client_action", "{\"action\":\"CAPTURE_UPLOAD\"}");
+        reply("");
+        chat("拍照").andExpect(jsonPath("$.data.clientCommand").value("CAPTURE_UPLOAD"))
+                .andExpect(jsonPath("$.data.text").value("已生成拍照上传指令，等待设备上传图片后再分析。"));
+    }
+
+    @Test
+    void repeatedInvalidCallsStopWithoutAnyAction() throws Exception {
+        for (int i = 0; i < 3; i++) toolCall("request_client_action", "{}");
+        chat("action").andExpect(jsonPath("$.data.clientCommand").value("NONE"))
+                .andExpect(jsonPath("$.data.text").value("本轮工具调用已达上限，请重新描述您的需求。"));
+        assertThat(chatCalls.get()).isEqualTo(3);
+        verifyNoInteractions(volunteer);
+    }
+
+    @Test
+    void summaryFailureKeepsCompletedActionAndCredentials() throws Exception {
+        toolCall("create_volunteer_help", "{}");
+        chatStatuses.add(200);
+        chatStatuses.add(503);
+        when(volunteer.createHelpTask()).thenReturn(Results.success(
+                new TargetRoomLinkInfoRespDTO("https://example.invalid/room", "private-ticket")));
+        chat("帮我找志愿者").andExpect(jsonPath("$.code").value("0"))
+                .andExpect(jsonPath("$.data.clientCommand").value("START_VIDEO_CALL"))
+                .andExpect(jsonPath("$.data.commandData.authTicket").value("private-ticket"))
+                .andExpect(jsonPath("$.data.text").value("志愿求助已创建，通话信息已返回客户端，等待客户端发起视频通话。"));
+        verify(volunteer, times(1)).createHelpTask();
+        assertThat(chatCalls.get()).isEqualTo(2);
+    }
+
+    private org.springframework.test.web.servlet.ResultActions chat(String input) throws Exception {
+        return mvc.perform(post("/api/agent/chat").header("token", "valid-token")
+                .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content(input));
+    }
+    private void reply(String text) {
+        replies.add(new JSONObject().set("role", "assistant").set("content", text));
+    }
+
+    private void toolCall(String name, String arguments) {
+        replies.add(new JSONObject().set("role", "assistant").set("content", "")
+                .set("tool_calls", List.of(new JSONObject().set("id", "call-" + replies.size()).set("type", "function")
+                        .set("function", new JSONObject().set("name", name).set("arguments", arguments)))));
+    }
+
 }

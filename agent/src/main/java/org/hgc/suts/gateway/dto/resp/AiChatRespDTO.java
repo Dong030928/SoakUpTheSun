@@ -22,6 +22,7 @@ public class AiChatRespDTO {
      * - "CONNECT_WS": 开启实时避障模式 (前端连接 WebSocket)
      * - "DISCONNECT_WS": 关闭实时避障
      * - "CAPTURE_UPLOAD": 单次拍照分析 (前端拍照并上传)
+     * - "START_VIDEO_CALL": 已取得通话信息，由前端发起视频通话
      */
     private String clientCommand;
 

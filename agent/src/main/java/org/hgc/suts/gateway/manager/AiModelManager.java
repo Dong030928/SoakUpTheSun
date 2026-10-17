@@ -11,7 +11,7 @@ import org.springframework.util.StringUtils;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Compatibility facade for the existing chain; model HTTP and JSON are owned by Spring AI. */
+/** Spring AI model helpers; the business tool loop is owned by AiChatServiceImpl's ChatClient. */
 @Component
 @RequiredArgsConstructor
 public class AiModelManager {

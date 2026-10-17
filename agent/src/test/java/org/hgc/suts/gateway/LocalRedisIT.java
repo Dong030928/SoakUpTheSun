@@ -41,6 +41,7 @@ class LocalRedisIT {
     private static final String PASSWORD = "agent-integration-only";
     private static final int REDIS_PORT = freePort();
     private static final Process REDIS = startRedis();
+    private static final ModelHttpFixture MODEL = new ModelHttpFixture();
     @LocalServerPort int port;
     @Autowired StringRedisTemplate redis;
     @Autowired JedisPooled jedis;
@@ -54,6 +55,7 @@ class LocalRedisIT {
         properties.add("spring.data.redis.host", () -> "127.0.0.1");
         properties.add("spring.data.redis.port", () -> REDIS_PORT);
         properties.add("spring.data.redis.password", () -> PASSWORD);
+        properties.add("suts.ai.api-host", MODEL::baseUrl);
     }
 
     static int freePort() {
@@ -95,6 +97,7 @@ class LocalRedisIT {
         connections.destroy();
         REDIS.destroy();
         if (!REDIS.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) REDIS.destroyForcibly();
+        MODEL.close();
     }
 
     @Test
@@ -104,7 +107,8 @@ class LocalRedisIT {
         redis.opsForHash().put(RedisCacheConstant.USER_LOGIN_KEY_USER_TO_TOKEN + "local-user", "local-token",
                 "{\"id\":99,\"userAccount\":\"local-user\"}");
         assertThat(jedis.get(RedisCacheConstant.USER_LOGIN_KEY_TOKEN_TO_USER + "local-token")).isEqualTo("local-user");
-        when(model.chat(anyString(), anyString())).thenReturn("{\"reply\":\"Redis 登录成功\"}");
+        MODEL.reset("Redis 登录成功");
+        MODEL.text("Redis 登录成功");
         when(model.embed(anyString())).thenReturn(Collections.nCopies(1024, 0.0));
         HttpClient http = HttpClient.newHttpClient();
         for (String suffix : new String[]{"", "/async"}) {

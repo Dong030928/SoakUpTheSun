@@ -21,6 +21,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import redis.clients.jedis.JedisPooled;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -46,6 +48,7 @@ import static org.mockito.Mockito.*;
 })
 class AgentApplicationTest {
     private static final HttpServer VOLUNTEER = volunteerServer();
+    private static final ModelHttpFixture MODEL = new ModelHttpFixture();
     private static final AtomicReference<String> FORWARDED_TOKEN = new AtomicReference<>();
     @LocalServerPort int port;
     @Autowired VolunteerRemoteService volunteer;
@@ -56,6 +59,11 @@ class AgentApplicationTest {
     @MockitoBean AiModelManager model;
     @MockitoBean NacosServiceManager nacos;
     private final HttpClient http = HttpClient.newHttpClient();
+
+    @DynamicPropertySource
+    static void modelProperties(DynamicPropertyRegistry properties) {
+        properties.add("suts.ai.api-host", MODEL::baseUrl);
+    }
 
     static HttpServer volunteerServer() {
         try {
@@ -77,7 +85,7 @@ class AgentApplicationTest {
     }
 
     @AfterAll
-    static void stopServer() { VOLUNTEER.stop(0); }
+    static void stopServer() { VOLUNTEER.stop(0); MODEL.close(); }
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -97,7 +105,8 @@ class AgentApplicationTest {
         when(values.get(RedisCacheConstant.USER_LOGIN_KEY_TOKEN_TO_USER + "fixture-token")).thenReturn("fixture");
         when(hashes.get(RedisCacheConstant.USER_LOGIN_KEY_USER_TO_TOKEN + "fixture", "fixture-token"))
                 .thenReturn("{\"id\":42,\"userAccount\":\"fixture\"}");
-        when(model.chat(anyString(), anyString())).thenReturn("{\"reply\":\"应用启动成功\"}");
+        MODEL.reset("应用启动成功");
+        MODEL.text("应用启动成功");
         when(model.embed(anyString())).thenReturn(java.util.Collections.nCopies(1024, 0.0));
     }
 
@@ -128,6 +137,26 @@ class AgentApplicationTest {
         } finally {
             UserContext.remove();
         }
+    }
+
+    @Test
+    void springAiToolLoopCallsFeignWithTheAsyncUsersToken() throws Exception {
+        MODEL.messages.clear();
+        MODEL.tool("create_volunteer_help", "{}");
+        MODEL.text("志愿求助已创建");
+        var response = http.send(HttpRequest.newBuilder(URI.create(base() + "/api/agent/chat/async"))
+                .header("token", "fixture-token").header("Content-Type", "text/plain;charset=UTF-8")
+                .POST(HttpRequest.BodyPublishers.ofString("请找志愿者")).build(), HttpResponse.BodyHandlers.ofString());
+        JSONObject body = JSONUtil.parseObj(response.body());
+        assertThat(body.getStr("code")).isEqualTo("0");
+        assertThat(body.getJSONObject("data").getStr("text")).isEqualTo("志愿求助已创建");
+        assertThat(body.getJSONObject("data").getStr("clientCommand")).isEqualTo("START_VIDEO_CALL");
+        assertThat(body.getJSONObject("data").getJSONObject("commandData").getStr("authTicket")).isEqualTo("fixture-ticket");
+        assertThat(FORWARDED_TOKEN.get()).isEqualTo("fixture-token");
+        assertThat(MODEL.requests).hasSize(2);
+        assertThat(MODEL.requests.toString()).doesNotContain("fixture-token", "fixture-ticket", "https://example.invalid/room");
+        assertThat(MODEL.requests.stream().skip(1).findFirst().orElseThrow().getJSONArray("messages").toString())
+                .contains("\"role\":\"tool\"", "通话信息已返回客户端");
     }
 
     @Test
