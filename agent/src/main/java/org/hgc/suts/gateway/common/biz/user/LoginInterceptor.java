@@ -2,7 +2,7 @@ package org.hgc.suts.gateway.common.biz.user;
 
 import cn.hutool.core.util.StrUtil;
 
-import com.alibaba.fastjson.JSON;
+import cn.hutool.json.JSONUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
@@ -50,7 +50,7 @@ public class LoginInterceptor implements HandlerInterceptor {
         }
 
         // 4. 放入当前线程上下文
-        UserInfoDTO userRespDTO = JSON.parseObject(userJson, UserInfoDTO.class);
+        UserInfoDTO userRespDTO = JSONUtil.toBean(userJson, UserInfoDTO.class);
         UserContext.setUser(userRespDTO);
 
 

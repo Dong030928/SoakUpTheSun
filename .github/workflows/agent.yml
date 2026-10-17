@@ -1,0 +1,47 @@
+name: Agent
+
+on:
+  push:
+    paths:
+      - 'agent/**'
+      - '.github/workflows/agent.yml'
+  pull_request:
+    paths:
+      - 'agent/**'
+      - '.github/workflows/agent.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+          cache-dependency-path: agent/pom.xml
+      - name: Verify application and API contracts
+        run: mvn -B -ntp -f agent/pom.xml clean verify
+      - name: Install isolated integration test prerequisite
+        if: matrix.java == '17'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+      - name: Verify with a private Redis process
+        if: matrix.java == '17'
+        run: mvn -B -ntp -f agent/pom.xml verify -Plocal-redis -Dredis.server.executable=/usr/bin/redis-server
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-tests-java-${{ matrix.java }}
+          path: |
+            agent/target/surefire-reports/
+            agent/target/failsafe-reports/
