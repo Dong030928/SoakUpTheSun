@@ -1,6 +1,6 @@
 # Agent
 
-Agent 使用 Spring AI 调用 DeepSeek 对话模型与 OpenAI 兼容的 Embedding 接口，保留现有三节点责任链和对外协议。Picture 仍使用原 Spring Boot 3 技术栈，通过 Redis 向 Agent 提供视觉证据。
+Agent 使用 Spring AI 调用 DeepSeek 对话模型与 OpenAI 兼容的 Embedding 接口，并使用原生工具调用替代三节点责任链，对外聊天协议保持不变。Picture 仍使用原 Spring Boot 3 技术栈，通过 Redis 向 Agent 提供视觉证据。
 
 ## 运行版本
 
@@ -40,7 +40,9 @@ Knife4j 替换为支持 Boot 4 的 springdoc，`/doc.html` 仍可访问，跳转
 
 原 `suts.ai.*` 配置名均保留，环境变量继续映射到这些属性；模型 Bean 由 `AiModelConfiguration` 显式构建，不混用一套独立的 `spring.ai.*` 凭证配置。对话必须配置 API Key 与模型名；Embedding 启用时同样必须配置其 Key 和模型名，缺少关键配置会在启动时报出属性名。测试使用 `src/test/resources/application.properties` 的本机虚构凭证，不连接真实供应商。
 
-对话使用 `ChatClient` + `DeepSeekChatModel`，Embedding 使用 `OpenAiEmbeddingModel`，由 Spring AI 及其 SDK 处理 HTTP/JSON。两条路径均显式禁用自动重试，保留每次调用仅一次尝试；当前非推理聊天保留 temperature 设置。Embedding 失败、输出空/零向量、包含非有限数或维度不匹配时，跳过该轮记忆检索/保存，不再制造零向量。
+对话使用 `ChatClient` + `DeepSeekChatModel`，Embedding 使用 `OpenAiEmbeddingModel`，由 Spring AI 及其 SDK 处理 HTTP/JSON。两条路径均显式禁用 HTTP 自动重试；工具执行后向模型回传结果属于新的模型请求，不是网络重试。当前非推理聊天保留 temperature 设置。Embedding 失败、输出空/零向量、包含非有限数或维度不匹配时，跳过该轮记忆检索/保存，不再制造零向量。
+
+对话模型必须支持原生 `tools/tool_calls`。本机私有 YAML 可通过 `--spring.config.additional-location=file:/absolute/path/to/agent-secrets.yaml` 显式加载；不要将真实 Key 写入源码或测试资源。
 
 在项目根目录执行：
 
@@ -68,6 +70,24 @@ curl -X POST http://localhost:10000/api/agent/chat \
 
 错误包装保留原行为：未登录/同步空输入为 `A000001`，同步未捕获异常为 `B000001`；异步空输入、失败、拥塞、等待超时分别为 `400/500/503/504`。这些是 Result 的业务码，不能等同于 HTTP 状态码。本次没有统一这些既有差异。
 
+## Spring AI 工具编排
+
+PR-03 删除 `AbstractChainNode`、`AiChatContext` 和分析/执行/总结三个节点，改由 `ChatClient` 与 `ToolCallingAdvisor` 驱动工具循环。模型直接回复自然语言，需要操作时返回标准 `tool_calls`；不再要求模型在正文里生成自定义 JSON 决策。
+
+| Spring AI 机制 | 本项目用途 |
+| --- | --- |
+| `@Tool`、`@ToolParam` | 声明 `create_volunteer_help` 和 `request_client_action`；从方法签名生成模型可见的参数 Schema |
+| `ChatClient.tools(agentTools)` | 每次请求显式提供这两个工具，不开放任意 Bean 查找 |
+| `ToolCallingAdvisor` | 接收工具调用、回传执行结果，并继续请求模型生成最终自然语言；替代手动总结节点 |
+| `ToolCallingManager` | 解析、分发和执行工具；每轮同一工具最多 2 次、总计最多 2 次，达到上限即结束循环 |
+| `ToolContext` | 传递本轮可信身份与结果状态，数据不发送给模型；工具核对当前登录上下文 |
+
+`AgentTools` 是无状态单例，`AgentToolState` 每次聊天新建。工具只能产生 `CONNECT_WS/DISCONNECT_WS/CAPTURE_UPLOAD`；`START_VIDEO_CALL` 仅在志愿服务成功返回非空房间链接及票据后由后端设置。票据和房间链接保留在响应 `commandData`，不回传给模型。没有调用工具的闲聊固定为 `NONE`。
+
+每轮最多选择一种操作，同轮重复请求复用已有结果，后续冲突动作被拒绝，不会再次创建求助或覆盖已确定指令。参数无效时返回脱敏错误供模型纠正。工具完成后若模型总结报错、为空或循环触及上限，使用已执行结果作为回复，并保留对应指令与数据。这是单轮去重，不是跨 HTTP 请求的业务幂等保障。
+
+客户端动作表示等待设备执行；创建求助成功只表示取得通话信息，不表示志愿者已经接通。现有长期记忆与视觉读取继续作为参考文本提供给模型；本 PR 不迁移到 ChatMemory、记忆 Advisor 或 Spring AI VectorStore。
+
 ## 自动验证
 
 普通测试不需要模型凭证、外部 Redis、Nacos、Docker 或其他微服务：
@@ -76,9 +96,10 @@ curl -X POST http://localhost:10000/api/agent/chat \
 mvn -B -ntp -f agent/pom.xml clean verify
 ```
 
-- `AgentChatContractTest`：保留原 15 项回归，并增加模型失败、超时、异常 Embedding 降级及视觉注入检查；使用实际 Spring AI 客户端与本机 HTTP 供应商替身。
-- `AgentApplicationTest`：4 项完整应用测试，运行嵌入式 Tomcat、Boot 自动配置、Jackson 3、springdoc、真实 NacosDiscoveryClient 和 LoadBalancer/Feign；NamingService 传输、Redis 和模型为替身，志愿服务为临时 HTTP 服务。覆盖同步/异步接口、服务发现后的 Token 透传与旧 Result 解析、日期格式、API 文档。
+- `AgentChatContractTest`：41 项接口与模型协议测试，覆盖原生工具循环、非法参数、未知工具、同轮去重与循环上限、失败与空总结兜底，以及模型超时、Embedding 降级和视觉注入。原“非法 JSON 决策”用例改为验证自然语言无需 JSON 解析，正文中的伪造 JSON 不能下发指令。
+- `AgentApplicationTest`：5 项完整应用测试，运行嵌入式 Tomcat、Boot 自动配置、Jackson 3、springdoc、真实 Spring AI HTTP 客户端、NacosDiscoveryClient 和 LoadBalancer/Feign；NamingService 传输、Redis 和模型供应商为替身，志愿服务为临时 HTTP 服务。覆盖同步/异步接口、异步工具调用后的 Token 透传与通话信息返回、日期格式、API 文档。
 - `AiModelConfigurationTest` 与 `VisionContextManagerTest`：配置缺失、显式禁用、非法向量、旧 Key/嵌套 answer、过期/损坏/跨用户记录及长度限制。
+- `AgentToolsTest`：登录上下文缺失或不匹配时拒绝执行，两个用户并发调用共享工具 Bean 时不串票据，下一轮不继承上一轮动作。
 
 真实 Redis 集成测试需要本机安装 redis-server，显式指定可执行文件：
 
@@ -115,13 +136,13 @@ Agent 优先读取新 Key，兼容旧 `suts:gateway:vision:context:{userId}` 及
 
 ## 本次验证范围与后续检查
 
-Boot 升级的历史记录见 `VALIDATION.md`；本次模型和视觉改造记录见 `VALIDATION-PR02.md`。构建使用 Maven 3.9.11，独立 Redis 为 8.2.1。
+Boot 升级的历史记录见 `VALIDATION.md`，模型和视觉改造记录见 `VALIDATION-PR02.md`，本次工具编排重构记录见 `VALIDATION-PR03.md`。构建使用 Maven 3.9.11，独立 Redis 为 8.2.1。
 
-已通过仓库外私有配置验证真实 DeepSeek `deepseek-flash` 和 SiliconFlow `Qwen/Qwen3-Embedding-0.6B` 调用，并以独立 Redis、预置视觉文本验证实际 JAR 的同步/异步聊天。该手工联调与使用替身的自动化测试分开执行，详情见 `VALIDATION-PR02.md`。
+已通过仓库外私有配置验证真实 DeepSeek `deepseek-flash` 和 SiliconFlow `Qwen/Qwen3-Embedding-0.6B` 调用。PR-03 以实际 JAR、独立 Redis、预置视觉文本和本机志愿服务替身验证原生工具调用：开启/关闭避障、拍照上传、异步志愿求助和后续闲聊。该手工联调与使用替身的自动化测试分开执行，详情见 `VALIDATION-PR03.md`。
 
 尚未验证真实 Nacos 服务端注册/注销及 gRPC 传输、原版志愿服务与完整视频服务联调、真实图片识别链路和 Redis 向量扩展。部署前应在隔离环境启动真实服务，检查 Agent 注册、求助路径、登录共享缓存与关闭行为。NamingService 替身验证不等于 Nacos 服务端互操作通过。
 
-前端尚未处理 Agent 指令、记忆异步、通用工具调用与志愿通知占位等问题仍由后续 PR 处理。
+前端指令落地、会话记忆/向量存储的框架迁移、请求取消与异步治理、志愿通知占位等问题仍由后续 PR 处理。
 
 ## 回退
 
