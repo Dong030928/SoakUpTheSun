@@ -117,7 +117,9 @@ Agent 优先读取新 Key，兼容旧 `suts:gateway:vision:context:{userId}` 及
 
 Boot 升级的历史记录见 `VALIDATION.md`；本次模型和视觉改造记录见 `VALIDATION-PR02.md`。构建使用 Maven 3.9.11，独立 Redis 为 8.2.1。
 
-尚未验证真实 Nacos 服务端注册/注销及 gRPC 传输、原版志愿服务与完整视频服务联调、真实付费模型和 Redis 向量扩展。部署前应在隔离环境启动真实服务，检查 Agent 注册、求助路径、登录共享缓存与关闭行为。NamingService 替身验证不等于 Nacos 服务端互操作通过。
+已通过仓库外私有配置验证真实 DeepSeek `deepseek-flash` 和 SiliconFlow `Qwen/Qwen3-Embedding-0.6B` 调用，并以独立 Redis、预置视觉文本验证实际 JAR 的同步/异步聊天。该手工联调与使用替身的自动化测试分开执行，详情见 `VALIDATION-PR02.md`。
+
+尚未验证真实 Nacos 服务端注册/注销及 gRPC 传输、原版志愿服务与完整视频服务联调、真实图片识别链路和 Redis 向量扩展。部署前应在隔离环境启动真实服务，检查 Agent 注册、求助路径、登录共享缓存与关闭行为。NamingService 替身验证不等于 Nacos 服务端互操作通过。
 
 前端尚未处理 Agent 指令、记忆异步、通用工具调用与志愿通知占位等问题仍由后续 PR 处理。
 

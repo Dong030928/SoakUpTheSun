@@ -22,9 +22,13 @@ Maven 3.9.11；Windows 11；Microsoft JDK 17.0.20.1、Oracle JDK 21.0.8；独立
 | Agent JDK 21 | `mvn -f agent/pom.xml verify` | 41 项普通测试 |
 | Picture JDK 17 | `mvn -f picture/pom.xml clean verify` | 8 项契约测试及打包 |
 | 实际 Agent 可执行 JAR | 随机端口、独立带密码 Redis、本机 HTTP 模型替身、禁用真实 Nacos | 启动、OpenAPI、同步/异步聊天与视觉文本进入模型请求 |
+| 真实供应商调用 | 使用打包后的 AiModelConfiguration/AiModelManager，读取仓库外私有 YAML | DeepSeek `deepseek-flash` 返回 OK；SiliconFlow `Qwen/Qwen3-Embedding-0.6B` 返回有效的 1024 维向量 |
+| 真实供应商 + Agent 可执行 JAR | 独立带密码 Redis、测试登录与预置视觉文本、真实 DeepSeek/SiliconFlow、禁用 Nacos | 同步和异步均返回业务码 0、正确复述蓝色雨伞，clientCommand 为 NONE |
 | 源码与依赖检查 | `git diff --check`、POM/依赖检查 | 仅 Agent、Picture 视觉链路及 CI/文档变化；不改向量索引 |
 
 普通测试使用实际 Spring AI 客户端与本机 HTTP 供应商替身验证协议和鉴权。测试凭证仅为 fixture；异常用例预期会打印失败或降级日志，不代表测试失败。原 15 项接口回归保留，响应仍为原字符串请求及 Result/客户端动作协议。
+
+本表结果已于 2026-10-17 对提交 `b73a7183` 重新验证。真实供应商测试与自动化测试分开执行，仅使用用户明确提供的仓库外私有配置，不把真实 Key 写入源码、测试资源或命令参数。可执行 JAR 联调使用预置的视觉文本，未执行图片识别；普通 Redis 缺少向量扩展，长期记忆存储按现有逻辑降级。
 
 ## 测试覆盖
 
@@ -45,10 +49,10 @@ Picture 的 Redis 默认值由原硬编码远端改为与 Agent 一致的本机�
 
 ## 验证边界
 
-- 未调用真实 DeepSeek、SiliconFlow 或其他付费供应商；HTTP 替身仅验证协议和故障路径，不能替代供应商能力验收。
+- 已验证上述两个真实模型的调用，以及真实模型参与的同步/异步聊天和视觉文本注入；仅为少量连通性及功能复验，不代表其他模型、负载或长期运行质量验收。故障路径继续使用 HTTP 替身验证。
 - 未连接真实 COS、RocketMQ 或执行 Python 模型推理；Picture 消费者使用 COS 对象流替身和本机 HTTP 路由。
 - Nacos 服务端传输和原版其他服务全链路仍未验证。已有 NamingService 替身测试继续确认发现适配和 Feign 契约。
 - 普通 Redis 不包含 RediSearch；集成测试验证视觉 Lua 和缓存读写，不表示长期向量检索已获真实扩展验收。
 - 前端客户端动作、工具框架迁移、短期会话记忆及完整异步治理属于后续 PR。
 
-所有外部验收均应使用隔离环境；不向仓库中已有远程地址或真实凭证发送测试请求。
+外部验收使用隔离环境；不使用仓库中历史远程地址或凭证，不提交或输出用户的私有 Key。
