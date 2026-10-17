@@ -67,8 +67,10 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, PictureDO> im
             throw new ClientException("图片是空的，无法分析");
         }
 
+        long requestedAt = System.currentTimeMillis();
         UploadPictureRespDTO uploadPictureRespDTO = this.uploadPicture(multipartFile);
         UploadPictureAnalysisEvent uploadPictureAnalysisEvent = UploadPictureAnalysisEvent.builder()
+                .requestedAt(requestedAt)
                 .pictureId(uploadPictureRespDTO.getId())
                 .imageKey(uploadPictureRespDTO.getUrl())
                 .descriptionContent(descriptionContent)

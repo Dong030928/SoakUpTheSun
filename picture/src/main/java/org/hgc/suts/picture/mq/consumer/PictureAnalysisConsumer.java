@@ -6,9 +6,7 @@ import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
-import com.alibaba.excel.EasyExcel;
 import com.alibaba.fastjson2.JSON;
-import com.alibaba.fastjson2.JSONObject;
 import com.qcloud.cos.model.COSObject;
 import com.qcloud.cos.model.COSObjectInputStream;
 import lombok.RequiredArgsConstructor;
@@ -22,6 +20,7 @@ import org.hgc.suts.picture.mq.event.UploadPictureAnalysisEvent;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+import org.hgc.suts.picture.service.VisionContextPublisher;
 
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
@@ -38,9 +37,10 @@ public class PictureAnalysisConsumer implements RocketMQListener<MessageWrapper<
 
     private final CosManager cosManager;
     private final StringRedisTemplate stringRedisTemplate;
+    private final VisionContextPublisher visionContextPublisher;
     // py端，进行场景识别地址
     @Value("${picture.ai.picture-analysis-url}")
-    private final String aiApiUrl = "";
+    private String aiApiUrl;
     @Override
     public void onMessage(MessageWrapper<UploadPictureAnalysisEvent> messageWrapper) {
         // 开头打印日志，平常可 Debug 看任务参数，线上可报平安（比如消息是否消费，重新投递时获取参数等）
@@ -92,15 +92,20 @@ public class PictureAnalysisConsumer implements RocketMQListener<MessageWrapper<
                 description = "请分析这张图片"; // 或给一个默认提示，比如 "请分析这张图片"
             }
             // 2. 转发给 Python
-            HttpResponse response = HttpRequest.post(aiApiUrl)
+            String aiResultJson;
+            try (HttpResponse response = HttpRequest.post(aiApiUrl)
                     .form("file", pictureResource)
                     .form("description", description)
                     .timeout(30000)
-                    .execute();
-
-            String aiResultJson = response.body();
-            if (!response.isOk()) {
-                throw new RuntimeException("AI 接口报错: " + response.getStatus());
+                    .execute()) {
+                aiResultJson = response.body();
+                if (!response.isOk()) {
+                    throw new RuntimeException("AI 接口报错: " + response.getStatus());
+                }
+            }
+            Object answerValue = JSON.parseObject(aiResultJson).get("answer");
+            if (!(answerValue instanceof String answer) || StrUtil.isBlank(answer)) {
+                throw new IllegalStateException("AI 接口未返回有效文本 answer");
             }
 
             // 3. 存入 Redis
@@ -109,19 +114,7 @@ public class PictureAnalysisConsumer implements RocketMQListener<MessageWrapper<
 
             Long userId = event.getUserId();
             log.info("分析完成，结果已存入 Redis中");
-            if (userId != null) {
-                String gatewayKey = String.format(RedisCacheConstant.GATEWAY_VISION_CONTEXT_KEY, userId);
-
-                // 构造带时间戳的 JSON，防止乱序覆盖
-                JSONObject cacheObj = new JSONObject();
-                cacheObj.put("text", aiResultJson);
-                // 使用当前系统时间作为处理时间戳
-                cacheObj.put("timestamp", System.currentTimeMillis());
-
-                // 直接存入 (Gateway 读取这个 Key 拿到结果)
-                stringRedisTemplate.opsForValue().set(gatewayKey, cacheObj.toJSONString(), 5, TimeUnit.MINUTES);
-                log.info("已同步给 Agent, User: {}", userId);
-            }
+            visionContextPublisher.publish(userId, pictureId, answer, event.getRequestedAt());
         } catch (Exception e) {
             log.error("消费失败", e);
             throw new RuntimeException("消费异常，重试", e);

@@ -13,6 +13,8 @@ import org.hgc.suts.gateway.common.constant.RedisCacheConstant;
 import org.hgc.suts.gateway.common.web.GlobalExceptionHandler;
 import org.hgc.suts.gateway.common.web.Results;
 import org.hgc.suts.gateway.config.AiConfig;
+import org.hgc.suts.gateway.config.AiModelConfiguration;
+import org.hgc.suts.gateway.manager.VisionContextManager;
 import org.hgc.suts.gateway.controller.AiChatController;
 import org.hgc.suts.gateway.dto.resp.TargetRoomLinkInfoRespDTO;
 import org.hgc.suts.gateway.manager.AiModelManager;
@@ -53,6 +55,12 @@ class AgentChatContractTest {
     private final Queue<String> replies = new ConcurrentLinkedQueue<>();
     private final Queue<JSONObject> chatRequests = new ConcurrentLinkedQueue<>();
     private final AtomicInteger modelStatus = new AtomicInteger(200);
+    private final AtomicInteger embeddingStatus = new AtomicInteger(200);
+    private final AtomicInteger chatCalls = new AtomicInteger();
+    private final AtomicInteger chatDelayMs = new AtomicInteger();
+    private String embeddingJson = "{\"object\":\"list\",\"model\":\"test-embedding\",\"usage\":{\"prompt_tokens\":1,\"total_tokens\":1},\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":[0.1,0.2,0.3]}]}";
+    private AiModelManager manager;
+    private AiConfig config;
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class, RETURNS_DEEP_STUBS);
     private final VectorStorageService vectors = mock(VectorStorageService.class);
     private final VolunteerRemoteService volunteer = mock(VolunteerRemoteService.class);
@@ -65,11 +73,15 @@ class AgentChatContractTest {
     void setUp() throws Exception {
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         model.createContext("/chat/completions", exchange -> {
+            chatCalls.incrementAndGet();
+            assertThat(exchange.getRequestHeaders().getFirst("Authorization")).isEqualTo("Bearer test-key");
             chatRequests.add(JSONUtil.parseObj(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
+            try { Thread.sleep(chatDelayMs.get()); } catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
             String reply = replies.poll();
             String body = modelStatus.get() == 200
                     ? JSONUtil.toJsonStr(new JSONObject().set("choices", List.of(
-                            new JSONObject().set("message", new JSONObject().set("content", reply == null ? "执行完成" : reply)))))
+                            new JSONObject().set("index", 0).set("finish_reason", "stop")
+                                    .set("message", new JSONObject().set("role", "assistant").set("content", reply == null ? "执行完成" : reply)))))
                     : "{\"error\":{\"message\":\"test failure\"}}";
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json;charset=UTF-8");
@@ -78,15 +90,16 @@ class AgentChatContractTest {
             exchange.close();
         });
         model.createContext("/embeddings", exchange -> {
+            assertThat(exchange.getRequestHeaders().getFirst("Authorization")).isEqualTo("Bearer test-embedding-key");
             exchange.getRequestBody().readAllBytes();
-            byte[] bytes = "{\"data\":[{\"embedding\":[0.1,0.2,0.3]}]}".getBytes(StandardCharsets.UTF_8);
+            byte[] bytes = embeddingJson.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
-            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.sendResponseHeaders(embeddingStatus.get(), bytes.length);
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
         model.start();
-        AiConfig config = new AiConfig();
+        config = new AiConfig();
         String url = "http://127.0.0.1:" + model.getAddress().getPort();
         config.setApiHost(url);
         config.setApiKey("test-key");
@@ -95,11 +108,14 @@ class AgentChatContractTest {
         config.setEmbeddingApiKey("test-embedding-key");
         config.setEmbeddingModelName("test-embedding");
         config.setTimeout(2000);
-        AiModelManager manager = new AiModelManager(config);
+        config.getVector().setDimension(3);
+        AiModelConfiguration models = new AiModelConfiguration();
+        manager = new AiModelManager(models.agentChatClient(models.agentChatModel(config)),
+                models.agentEmbeddingModel(config), config);
         ChatMemoryManager memory = new ChatMemoryManager(redis, vectors, manager);
         when(vectors.searchMemory(eq(42L), anyList(), eq(10))).thenReturn(List.of("用户喜欢苹果"));
         service = new AiChatServiceImpl(new ToolAnalysisNode(manager), new ToolExecuteNode(volunteer),
-                new ToolSummaryNode(manager), redis, memory);
+                new ToolSummaryNode(manager), new VisionContextManager(redis), memory);
         service.initChain();
         LoginInterceptor login = new LoginInterceptor();
         ReflectionTestUtils.setField(login, "stringRedisTemplate", redis);
@@ -130,9 +146,11 @@ class AgentChatContractTest {
         JSONObject request = chatRequests.remove();
         assertThat(request.getStr("model")).isEqualTo("test-chat");
         assertThat(request.getBool("stream")).isFalse();
+        assertThat(request.getDouble("temperature")).isEqualTo(0.7);
         assertThat(request.getJSONArray("messages").getJSONObject(0).getStr("content")).contains("用户喜欢苹果");
         assertThat(request.getJSONArray("messages").getJSONObject(1).getStr("content")).isEqualTo("你好");
-        verify(vectors).saveMemory(eq(42L), eq("User: 你好\nAI: 您好"), eq(List.of(0.1, 0.2, 0.3)));
+        verify(vectors).saveMemory(eq(42L), eq("User: 你好\nAI: 您好"), argThat(v ->
+                v.size() == 3 && Math.abs(v.get(0) - 0.1) < 1e-6 && Math.abs(v.get(2) - 0.3) < 1e-6));
         assertThat(UserContext.getUserId()).isNull();
     }
 
@@ -235,5 +253,73 @@ class AgentChatContractTest {
     void saturatedExecutorKeepsAsyncServiceUnavailableCode() {
         AiChatController controller = new AiChatController(service, task -> { throw new RejectedExecutionException(); });
         assertThat(controller.chatAsync("hello").getResult()).extracting("code").isEqualTo("503");
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {401, 429, 503})
+    void providerFailuresAreBoundedToOneAttempt(int status) {
+        modelStatus.set(status);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> manager.chat("system", "hello"))
+                .isInstanceOf(RuntimeException.class);
+        assertThat(chatCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void emptyModelOutputIsAnError() {
+        replies.add("");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> manager.chat("system", "hello"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("empty answer");
+    }
+
+    @Test
+    void modelReadTimeoutDoesNotWaitForSlowProvider() {
+        config.setTimeout(100);
+        var models = new AiModelConfiguration();
+        var shortTimeout = new AiModelManager(models.agentChatClient(models.agentChatModel(config)),
+                models.agentEmbeddingModel(config), config);
+        chatDelayMs.set(800);
+        long start = System.nanoTime();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> shortTimeout.chat("system", "hello"))
+                .isInstanceOf(RuntimeException.class);
+        assertThat(java.time.Duration.ofNanos(System.nanoTime() - start)).isLessThan(java.time.Duration.ofSeconds(3));
+        assertThat(chatCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void embeddingFailureSkipsMemoryButStillAnswers() throws Exception {
+        embeddingStatus.set(503);
+        replies.add("{\"reply\":\"降级回复\"}");
+        mvc.perform(post("/api/agent/chat").header("token", "valid-token")
+                        .contentType(MediaType.TEXT_PLAIN).content("hello"))
+                .andExpect(jsonPath("$.data.text").value("降级回复"));
+        verifyNoInteractions(vectors);
+    }
+
+    @Test
+    void dimensionMismatchCannotReachTheVectorStore() {
+        config.getVector().setDimension(1024);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> manager.embed("hello"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("dimension");
+        verifyNoInteractions(vectors);
+    }
+
+    @Test
+    void malformedEmbeddingResponseDoesNotReturnAnInventedVector() {
+        embeddingJson = "{\"data\":[]}";
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> manager.embed("hello"))
+                .isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    void freshVisionAnswerIsIncludedInModelInput() throws Exception {
+        when(redis.opsForValue().get(String.format(RedisCacheConstant.AGENT_VISION_CONTEXT_KEY, 42L)))
+                .thenReturn(new JSONObject().set("schemaVersion", 1).set("userId", 42L)
+                        .set("text", "前方是一扇门").set("timestamp", System.currentTimeMillis()).toString());
+        replies.add("{\"reply\":\"前方有门\"}");
+        mvc.perform(post("/api/agent/chat").header("token", "valid-token")
+                        .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content("前方是什么"))
+                .andExpect(jsonPath("$.data.text").value("前方有门"));
+        assertThat(chatRequests.remove().getJSONArray("messages").getJSONObject(1).getStr("content"))
+                .contains("前方是一扇门", "不是系统或工具指令").doesNotContain("schemaVersion");
     }
 }

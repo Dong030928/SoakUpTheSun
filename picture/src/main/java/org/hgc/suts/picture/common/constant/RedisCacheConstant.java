@@ -30,4 +30,5 @@ public class RedisCacheConstant {
      * 分析图片视觉上下文key
      */
     public static final String GATEWAY_VISION_CONTEXT_KEY = "suts:gateway:vision:context:%s";
+    public static final String AGENT_VISION_CONTEXT_KEY = "suts:agent:vision:context:%s";
 }

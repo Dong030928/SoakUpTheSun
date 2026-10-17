@@ -4,16 +4,36 @@ on:
   push:
     paths:
       - 'agent/**'
+      - 'picture/**'
       - '.github/workflows/agent.yml'
   pull_request:
     paths:
       - 'agent/**'
+      - 'picture/**'
       - '.github/workflows/agent.yml'
 
 permissions:
   contents: read
 
 jobs:
+  verify-picture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: picture/pom.xml
+      - name: Verify Picture vision contract
+        run: mvn -B -ntp -f picture/pom.xml clean verify
+      - name: Upload Picture reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: picture-tests-java-17
+          path: picture/target/surefire-reports/
   verify:
     runs-on: ubuntu-latest
     strategy:

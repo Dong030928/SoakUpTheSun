@@ -9,9 +9,9 @@ spring:
     password: 123456
   data:
     redis:
-      host: 47.120.60.61
-      port: 6379
-      password: 123456
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
       timeout: 50000
   cloud:
     nacos:
@@ -47,5 +47,5 @@ picture:
     # 空间图片最大数量
     max-count: 10000
   ai:
-    picture-analysis-url: http://127.0.0.1:20000/api/vision-qa/qa
+    picture-analysis-url: ${VISION_QA_URL:http://127.0.0.1:20000/vision-qa/qa}
     video-frame-url: http://127.0.0.1:20000/risk/assess-file

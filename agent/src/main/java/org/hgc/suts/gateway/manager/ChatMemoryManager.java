@@ -70,7 +70,7 @@ public class ChatMemoryManager {
             return sb.toString();
 
         } catch (Exception e) {
-            log.error("获取向量记忆失败: {}", e.getMessage());
+            log.warn("长期记忆检索不可用，跳过本轮检索 ({})", e.getClass().getSimpleName());
             return "";
         }
     }
@@ -95,7 +95,7 @@ public class ChatMemoryManager {
             // 原来的 remove range 逻辑已删除，因为向量库通常不设物理条数限制，而是依赖磁盘容量
 
         } catch (Exception e) {
-            log.error("保存记忆异常", e);
+            log.warn("长期记忆保存不可用，跳过本轮写入 ({})", e.getClass().getSimpleName());
         }
     }
 

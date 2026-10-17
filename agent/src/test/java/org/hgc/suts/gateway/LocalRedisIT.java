@@ -44,6 +44,7 @@ class LocalRedisIT {
     @LocalServerPort int port;
     @Autowired StringRedisTemplate redis;
     @Autowired JedisPooled jedis;
+    @Autowired org.hgc.suts.gateway.manager.VisionContextManager vision;
     @MockitoBean AiModelManager model;
     @MockitoBean VectorIndexManager index;
     @MockitoBean VectorStorageService vectors;
@@ -113,5 +114,25 @@ class LocalRedisIT {
             assertThat(response.statusCode()).isEqualTo(200);
             assertThat(JSONUtil.parseObj(response.body()).getJSONObject("data").getStr("text")).isEqualTo("Redis 登录成功");
         }
+    }
+
+    @Test
+    void pictureLuaPublishesFreshEvidenceAndRejectsOutOfOrderAnalysis() {
+        var script = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();
+        script.setLocation(new org.springframework.core.io.ClassPathResource("contracts/picture/lua/update_vision_context.lua"));
+        script.setResultType(Long.class);
+        String key = String.format(RedisCacheConstant.AGENT_VISION_CONTEXT_KEY, 42L);
+        long timestamp = System.currentTimeMillis();
+        String current = new cn.hutool.json.JSONObject().set("schemaVersion", 1).set("userId", 42L)
+                .set("pictureId", 7L).set("text", "新图像").set("timestamp", timestamp).toString();
+        String stale = new cn.hutool.json.JSONObject().set("text", "乱序旧图像").set("timestamp", timestamp - 1000).toString();
+        assertThat(redis.execute(script, java.util.List.of(key), current, "" + timestamp, "300000")).isEqualTo(1);
+        assertThat(redis.execute(script, java.util.List.of(key), stale, "" + (timestamp - 1000), "300000")).isEqualTo(0);
+        assertThat(vision.getRecentVision(42L)).isEqualTo("新图像");
+        assertThat(redis.getExpire(key, java.util.concurrent.TimeUnit.MILLISECONDS)).isBetween(1L, 300000L);
+        assertThat(vision.getRecentVision(7L)).isEmpty();
+        redis.opsForValue().set(key, "{broken");
+        assertThat(redis.execute(script, java.util.List.of(key), current, "" + timestamp, "300000")).isEqualTo(1);
+        assertThat(vision.getRecentVision(42L)).isEqualTo("新图像");
     }
 }
