@@ -72,6 +72,17 @@ public class ConversationMemory {
             return MessageChatMemoryAdvisor.builder(memory).build();
         }
 
+        public org.hgc.suts.gateway.memory.summary.SummaryContext.Selection selectContext(String system, String enrichedInput, String tools) {
+            return lease.selectContext(new org.hgc.suts.gateway.memory.summary.SummaryContext.Request(system, enrichedInput, tools, input));
+        }
+        public MessageChatMemoryAdvisor advisor(org.hgc.suts.gateway.memory.summary.SummaryContext.Selection selection) {
+            ChatMemory memory = MessageWindowChatMemory.builder().maxMessages(Math.max(2, selection.history().size() + 2))
+                    .chatMemoryRepository(new InMemoryChatMemoryRepository()).build();
+            if (!selection.history().isEmpty()) memory.add(id, selection.history());
+            return MessageChatMemoryAdvisor.builder(memory).build();
+        }
+        public org.hgc.suts.gateway.memory.summary.SummaryContext.Source source() { return lease.source(); }
+
         public boolean commit(String answer) {
             if (!properties.isWritesEnabled()) return false;
             try {

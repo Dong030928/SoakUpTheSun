@@ -59,6 +59,27 @@ public final class JdbcConversationArchive implements ConversationArchive {
     public Statistics statistics() { return new Statistics(applied.sum(), duplicates.sum(), failed.sum(), elapsed.sum()); }
     public record Statistics(long appliedEvents, long duplicateEvents, long failedCalls, long archiveCallNanos) { }
 
+    /** Internal infrastructure capabilities: summary jobs use the same archive database and transaction manager. */
+    public JdbcTemplate jdbcOperations() { return jdbc; }
+    public TransactionTemplate transactionOperations() { return transactions; }
+
+    public List<org.hgc.suts.gateway.memory.summary.SummaryState.RawTurn> completeRange(long owner, String id,
+                                                                                       long epoch, long from, long to) {
+        ArchivedTurn.validateIdentity(owner, id, epoch);
+        Assert.isTrue(from > 0 && to >= from && to - from < 10000, "Invalid bounded archive range");
+        return transactions.execute(status -> {
+            Row row = lock(id);
+            requireSession(row, owner, epoch);
+            Assert.state(!row.retired && row.through >= to, "Summary input has not been completely archived");
+            var turns = jdbc.query("SELECT turn_seq, user_text, assistant_text, payload_hash FROM agent_memory_turn "
+                            + "WHERE conversation_id = ? AND epoch = ? AND turn_seq >= ? AND turn_seq <= ? ORDER BY turn_seq",
+                    (rs, i) -> new org.hgc.suts.gateway.memory.summary.SummaryState.RawTurn(rs.getLong(1), rs.getString(2),
+                            rs.getString(3), rs.getString(4)), id, epoch, from, to);
+            Assert.state(turns.size() == to - from + 1, "Summary input has a durable history gap");
+            return turns;
+        });
+    }
+
     /** A committed consumption log, not a speculative highest-seen sequence, repairs a lost Redis receipt. */
     public boolean hasApplied(ArchivedTurn turn) {
         List<String> hashes = jdbc.query("SELECT payload_hash FROM memory_log WHERE event_id = ? AND state = 'APPLIED'",
@@ -147,6 +168,11 @@ public final class JdbcConversationArchive implements ConversationArchive {
             if (rows.isEmpty()) return false;
             Row row = rows.get(0);
             requireSession(row, userId, epoch);
+            Assert.state(jdbc.queryForObject("SELECT COUNT(*) FROM agent_memory_job WHERE conversation_id = ? AND epoch = ? "
+                            + "AND state NOT IN ('DONE', 'STALE')", Long.class, conversationId, epoch) == 0,
+                    "Drain summary jobs before archive retention");
+            Assert.state(jdbc.queryForObject("SELECT COUNT(*) FROM agent_memory_summary WHERE conversation_id = ? AND epoch = ?",
+                    Long.class, conversationId, epoch) == 0, "Retire summary projections and vectors explicitly before deleting their source history");
             Assert.state(row.highest == row.through, "Cannot retire an archive with missing turns");
             Assert.state(row.activity > 0, "Legacy records have unknown activity time; do not infer their retention deadline");
             if (row.retired || row.activity >= cutoff) return false;

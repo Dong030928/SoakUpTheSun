@@ -32,8 +32,8 @@ jobs:
           cache-dependency-path: agent/pom.xml
       - name: Start isolated durable Redis, MySQL and RocketMQ
         run: bash agent/src/test/fixtures/memory-transactions/start.sh
-      - name: Verify transaction acceptance, checkback and archival recovery
-        run: mvn -B -ntp -f agent/pom.xml verify -Pmemory-transactions -Dmemory.transactions.fixture=agent-transactions-integration-only
+      - name: Verify transactions, summary compaction and memory recovery
+        run: mvn -B -ntp -f agent/pom.xml verify -Pmemory-transactions,memory-summary -Dmemory.transactions.fixture=agent-transactions-integration-only
       - name: Stop and remove only the isolated transaction fixtures
         if: always()
         run: docker compose -f agent/src/test/fixtures/memory-transactions/compose.yaml down --volumes

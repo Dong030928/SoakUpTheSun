@@ -20,7 +20,7 @@ Redis 登录、视觉与短期会话使用 Spring Data Redis/Lettuce；长期记
 
 已有长期记忆的部署应先阅读 `MEMORY-MIGRATION.md`：新版本使用独立 v2 JSON 索引，不自动读取或覆盖旧 HASH 向量。只切应用而不迁移，会暂时无法召回旧长期记忆。
 
-M01 增加可选 JDBC 归档与离线恢复基础，见 [ARCHIVE-M01.md](ARCHIVE-M01.md)。M02 已接通 RocketMQ 事务消息、共享回查证据、MySQL 幂等异步落库、对账重投及受控切换/回退，见 [ARCHIVE-M02.md](ARCHIVE-M02.md)。两者默认关闭，原 Redis 模式不需要 MySQL/MQ；事务模式须显式配置并满足持久化、容量与数据切换要求。TTL 双水位及摘要向量检索由 M03 实现。
+M01 增加可选 JDBC 归档与离线恢复基础，见 [ARCHIVE-M01.md](ARCHIVE-M01.md)。M02 已接通 RocketMQ 事务消息、共享回查证据、MySQL 幂等异步落库、对账重投及受控切换/回退，见 [ARCHIVE-M02.md](ARCHIVE-M02.md)。M03 在其上实现显式 Token 双水位、按厂商规则配置的 TTL、事务投递的异步继承式摘要、持久任务恢复及摘要向量检索，见 [ARCHIVE-M03.md](ARCHIVE-M03.md)。三者默认关闭，原 Redis 模式不需要 MySQL/MQ；启用摘要需先完成 V2 Schema 和事务归档部署，并提供经确认的模型预算及水位，未提供厂商 TTL 时只使用硬上限触发。
 
 PR-01 中，Agent 没有数据库 Mapper、SQL 操作或具体 MQ 生产者，因此移除了 MyBatis-Plus、MySQL、RocketMQ 及未被调用的 MQ 抽象模板；用 Spring Data Redis 替代只为 StringRedisTemplate 引入的 Redisson。该次升级仅涉及 Agent；PR-02 另修复 Picture 的视觉上下文链路。
 
@@ -155,6 +155,17 @@ docker stop suts-memory-it
 ```
 
 CI 在 Java 17/21 上运行 Agent 普通验证；Java 17 额外运行私有 Redis、Query Engine/JSON 向量及迁移集成，并保留 Picture 契约测试。
+
+M03 与 M02 共用隔离基础设施，在 Java 17/21 CI 运行真实 Redis/MySQL/RocketMQ 和摘要恢复测试：
+
+```sh
+bash agent/src/test/fixtures/memory-transactions/start.sh
+mvn -B -ntp -f agent/pom.xml verify -Pmemory-transactions,memory-summary \
+  -Dmemory.transactions.fixture=agent-transactions-integration-only
+docker compose -f agent/src/test/fixtures/memory-transactions/compose.yaml down --volumes
+```
+
+这些集成测试的模型和 Embedding 是替身。另有显式付费启用的三次真实模型检查，命令和验收边界见 [VALIDATION-M03.md](VALIDATION-M03.md)，不会在普通测试或 CI 读取私有 Key。
 
 ## 视觉上下文协议
 

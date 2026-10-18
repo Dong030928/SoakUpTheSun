@@ -21,6 +21,7 @@ public final class TransactionCheckpointMaintenance {
         ArchivedTurn.validateIdentity(owner, id, epoch);
         Assert.isTrue(checkpoint > 0 && checkpoint <= 9999999999999L, "Explicit verified checkpoint is required");
         try (var lease = redis.open(id)) {
+            lease.assertNoSummaryState();
             var snapshot = archive.snapshot(owner, id, epoch).orElseThrow();
             Assert.state(snapshot.matchesCheckpoint(checkpoint), "Archive does not match the independent producer checkpoint");
             Assert.state(ledger.read(id) == null, "Cannot replace existing transaction evidence");
@@ -42,6 +43,7 @@ public final class TransactionCheckpointMaintenance {
         Assert.state(!memory.isWritesEnabled() && drained, "Stop and drain writers, consumers and checkers before rollback");
         ArchivedTurn.validateIdentity(owner, id, epoch);
         try (var lease = redis.open(id)) {
+            lease.assertNoSummaryState();
             var state = ledger.read(id);
             Assert.state(state != null && state.epoch() == epoch, "Rollback producer epoch does not match the archive");
             var snapshot = archive.snapshot(owner, id, epoch).orElseThrow();

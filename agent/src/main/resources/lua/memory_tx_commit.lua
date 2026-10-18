@@ -5,6 +5,7 @@ local function stringOrNone(k)
     return t == 'string' or t == 'none'
 end
 if not stringOrNone(KEYS[1]) or not stringOrNone(KEYS[2]) or not stringOrNone(KEYS[3]) then return 0 end
+if #KEYS == 4 and (not stringOrNone(KEYS[4]) or redis.call('GET', KEYS[4]) ~= ARGV[16]) then return 0 end
 local raw = redis.call('GET', KEYS[2])
 if not raw then return 0 end
 local ok, s = pcall(cjson.decode, raw)
@@ -47,7 +48,8 @@ if state == 'ABORTED' then
     redis.call('SET', KEYS[2], encoded)
     return -1
 end
-redis.call('MSET', KEYS[2], encoded, KEYS[3], ARGV[8])
+if #KEYS == 4 then redis.call('MSET', KEYS[2], encoded, KEYS[3], ARGV[8], KEYS[4], ARGV[17])
+else redis.call('MSET', KEYS[2], encoded, KEYS[3], ARGV[8]) end
 -- A failure after MSET still has complete commit proof. An omitted expiry only retains the cache longer.
 redis.call('PEXPIRE', KEYS[3], ttl)
 return 1

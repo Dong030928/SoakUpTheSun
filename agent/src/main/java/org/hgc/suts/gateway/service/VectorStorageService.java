@@ -13,6 +13,13 @@ public interface VectorStorageService {
      * @param content 原始记忆文本 (例如："用户提到他对花生过敏")
      */
     void saveMemory(Long userId, String content);
+    default void saveTurn(Long userId, String content, org.hgc.suts.gateway.memory.summary.SummaryContext.Source source) {
+        saveMemory(userId, content);
+    }
+    default String saveSummary(SummaryDocument document) { return "SKIPPED"; }
+    default void deleteSummaryDocuments(List<String> ids) { }
+    record SummaryDocument(long userId, String conversationId, long epoch, long version, long from, long to,
+                           String text, String documentId) { }
 
     /**
      * 语义检索

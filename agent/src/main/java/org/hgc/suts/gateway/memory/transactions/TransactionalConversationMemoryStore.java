@@ -22,11 +22,18 @@ public final class TransactionalConversationMemoryStore implements ConversationM
     private final TransactionTransport transport;
     private final MemoryTransactionProperties config;
     private final long hotTtlMs;
+    private final org.hgc.suts.gateway.memory.summary.SummaryCoordinator summaries;
 
     public TransactionalConversationMemoryStore(RedisConversationMemoryRepository redis, RedisTransactionLedger ledger,
             ConversationArchive archive, TransactionTransport transport, MemoryTransactionProperties config, long hotTtlMs) {
+        this(redis, ledger, archive, transport, config, hotTtlMs, null);
+    }
+    public TransactionalConversationMemoryStore(RedisConversationMemoryRepository redis, RedisTransactionLedger ledger,
+            ConversationArchive archive, TransactionTransport transport, MemoryTransactionProperties config, long hotTtlMs,
+            org.hgc.suts.gateway.memory.summary.SummaryCoordinator summaries) {
         this.redis = redis; this.ledger = ledger; this.archive = archive; this.transport = transport;
         this.config = config; this.hotTtlMs = hotTtlMs;
+        this.summaries = summaries;
     }
 
     @Override public Session open(String id) {
@@ -35,6 +42,7 @@ public final class TransactionalConversationMemoryStore implements ConversationM
         try {
             // Explicit fail-closed admission happens before any model/tool execution.
             transport.preflight();
+            if (summaries == null) lease.assertNoSummaryState();
             var state = ledger.read(id);
             long userId = Long.parseLong(id.split(":")[1]);
             if (state == null) {
@@ -46,6 +54,7 @@ public final class TransactionalConversationMemoryStore implements ConversationM
             }
             if (state == null) throw new MemoryTransactionsUnavailableException();
             ledger.admit(state);
+            if (summaries != null) summaries.prepare(id, userId, lease, state);
             if (!lease.hasStoredSnapshot() && state.head() > 0) {
                 // Independent producer head + gap-free DB checkpoint; never infer completeness from SQL MAX(seq).
                 var checkpoint = archive.snapshot(userId, id, state.epoch()).orElseThrow(MemoryTransactionsUnavailableException::new);
@@ -79,7 +88,7 @@ public final class TransactionalConversationMemoryStore implements ConversationM
                 public List<Message> findByConversationId(String candidate) {
                     requireId(candidate);
                     List<Message> messages = lease.repository().findByConversationId(id);
-                    if (base.head() > 0 && messages.isEmpty()) throw new MemoryTransactionsUnavailableException();
+                    if (summaries == null && base.head() > 0 && messages.isEmpty()) throw new MemoryTransactionsUnavailableException();
                     return messages;
                 }
                 public void saveAll(String candidate, List<Message> messages) {
@@ -93,6 +102,14 @@ public final class TransactionalConversationMemoryStore implements ConversationM
         public ChatMemoryRepository repository() { return repository; }
         public void assertValid() { lease.assertValid(); }
         public void close() { lease.close(); }
+        @Override public org.hgc.suts.gateway.memory.summary.SummaryContext.Selection selectContext(
+                org.hgc.suts.gateway.memory.summary.SummaryContext.Request request) {
+            if (summaries == null) return null;
+            return summaries.select(id, lease, request);
+        }
+        @Override public org.hgc.suts.gateway.memory.summary.SummaryContext.Source source() {
+            return result != null && result.saved() ? new org.hgc.suts.gateway.memory.summary.SummaryContext.Source(id, base.epoch(), base.head() + 1) : null;
+        }
         private void requireId(String candidate) {
             if (!id.equals(candidate)) throw new IllegalArgumentException("Conversation owner mismatch");
         }
@@ -106,13 +123,25 @@ public final class TransactionalConversationMemoryStore implements ConversationM
             String payload = RedisConversationMemoryRepository.encode(snapshot, id);
             String fencingToken = lease.fencingToken();
             try {
-                var state = transport.send(event, () -> ledger.commit(event, fencingToken, base.head(), payload, hotTtlMs));
+                var state = transport.send(event, () -> {
+                    if (summaries == null) return ledger.commit(event, fencingToken, base.head(), payload, hotTtlMs);
+                    for (int attempt = 0; attempt < 16; attempt++) {
+                        var mutation = summaries.append(event.turn());
+                        var accepted = ledger.commit(event, fencingToken, base.head(), payload, hotTtlMs, mutation.expected(), mutation.next());
+                        if (accepted != TransactionTransport.State.UNKNOWN) return accepted;
+                    }
+                    return TransactionTransport.State.UNKNOWN;
+                });
                 if (state == TransactionTransport.State.COMMITTED) result = MemoryCommitStatus.ACCEPTED;
             } catch (RuntimeException ex) {
                 log.warn("事务发送结果未确认，保留本轮业务结果 ({})", ex.getClass().getSimpleName());
             }
             if (result != MemoryCommitStatus.ACCEPTED && ledger.check(event) == TransactionTransport.State.COMMITTED) {
                 result = MemoryCommitStatus.PENDING;
+            }
+            if (summaries != null && result.saved()) {
+                try { summaries.afterCommit(id, lease); }
+                catch (RuntimeException ex) { log.warn("归档已接受，摘要检测等待扫描修复 ({})", ex.getClass().getSimpleName()); }
             }
             return result;
         }
