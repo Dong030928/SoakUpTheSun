@@ -79,7 +79,12 @@ public class AiChatServiceImpl implements AiChatService {
                 answer = state.fallbackText();
             }
             if (turn.commit(answer)) chatMemoryManager.saveHistory(userId, userDescription, answer);
-            return state.response(answer);
+            if (turn.status() == org.hgc.suts.gateway.memory.MemoryCommitStatus.DEGRADED) {
+                answer += "\n本轮对话记忆未确认保存，已完成的操作不受影响。";
+            }
+            AiChatRespDTO result = state.response(answer);
+            result.setMemoryStatus(turn.status());
+            return result;
         }
     }
 

@@ -131,7 +131,8 @@ class AgentChatContractTest {
         when(redis.opsForHash().get(RedisCacheConstant.USER_LOGIN_KEY_USER_TO_TOKEN + "test-user", "valid-token"))
                 .thenReturn("{\"id\":42,\"userAccount\":\"test-user\",\"birthday\":\"2000-01-02 03:04:05\"}");
         mvc = MockMvcBuilders.standaloneSetup(new AiChatController(service, TtlExecutors.getTtlExecutor(workers)))
-                .setControllerAdvice(new GlobalExceptionHandler()).addInterceptors(login).build();
+                .setControllerAdvice(new GlobalExceptionHandler(), new org.hgc.suts.gateway.common.web.MemoryStatusAdvice())
+                .addInterceptors(login).build();
     }
 
     @AfterEach
@@ -149,6 +150,8 @@ class AgentChatContractTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.code").value("0"))
                 .andExpect(jsonPath("$.data.text").value("您好"))
                 .andExpect(jsonPath("$.data.clientCommand").value("NONE"))
+                .andExpect(header().string("X-Agent-Memory-Status", "cached"))
+                .andExpect(jsonPath("$.data.memoryStatus").doesNotExist())
                 .andExpect(jsonPath("$.success").value(true));
         JSONObject request = chatRequests.remove();
         assertThat(request.getStr("model")).isEqualTo("test-chat");
@@ -179,6 +182,7 @@ class AgentChatContractTest {
                 .andExpect(request().asyncStarted()).andReturn();
         pending.getAsyncResult(5000);
         mvc.perform(asyncDispatch(pending)).andExpect(status().isOk())
+                .andExpect(header().string("X-Agent-Memory-Status", "cached"))
                 .andExpect(jsonPath("$.code").value("0"))
                 .andExpect(jsonPath("$.data.text").value("异步回复"));
         verify(vectors).saveMemory(eq(42L), contains("hello"));
@@ -547,14 +551,43 @@ class AgentChatContractTest {
         var lease = mock(RedisConversationMemoryRepository.Lease.class);
         var repository = mock(org.springframework.ai.chat.memory.ChatMemoryRepository.class);
         when(lease.repository()).thenReturn(repository);
+        when(lease.commit(anyString(), anyString(), anyString(), anyList())).thenCallRealMethod();
         when(repository.findByConversationId(anyString())).thenReturn(List.of());
         doThrow(new org.hgc.suts.gateway.memory.MemoryLeaseLostException()).when(repository).saveAll(anyString(), anyList());
         when(conversations.open(anyString())).thenReturn(lease);
         toolCall("request_client_action", "{\"action\":\"CAPTURE_UPLOAD\"}");
         reply("等待上传");
         chat("拍照").andExpect(jsonPath("$.code").value("0"))
-                .andExpect(jsonPath("$.data.clientCommand").value("CAPTURE_UPLOAD"));
+                .andExpect(jsonPath("$.data.clientCommand").value("CAPTURE_UPLOAD"))
+                .andExpect(header().string("X-Agent-Memory-Status", "degraded"))
+                .andExpect(jsonPath("$.data.text").value(org.hamcrest.Matchers.containsString("记忆未确认保存")));
         verify(vectors, never()).saveMemory(anyLong(), anyString());
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"ACCEPTED", "PENDING"})
+    void memoryAcceptanceStatusUsesAHeaderWithoutChangingJsonFields(String name) throws Exception {
+        var lease = mock(RedisConversationMemoryRepository.Lease.class);
+        when(lease.repository()).thenReturn(new org.springframework.ai.chat.memory.InMemoryChatMemoryRepository());
+        when(lease.commit(anyString(), anyString(), anyString(), anyList()))
+                .thenReturn(org.hgc.suts.gateway.memory.MemoryCommitStatus.valueOf(name));
+        when(conversations.open(anyString())).thenReturn(lease);
+        reply("本轮回复");
+        chat("你好").andExpect(header().string("X-Agent-Memory-Status", name.toLowerCase(java.util.Locale.ROOT)))
+                .andExpect(jsonPath("$.data.text").value("本轮回复"))
+                .andExpect(jsonPath("$.data.memoryStatus").doesNotExist());
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/agent/chat", "/api/agent/chat/async"})
+    void unavailableTransactionAdmissionRejectsBeforeModelAndTools(String path) throws Exception {
+        when(conversations.open(anyString())).thenThrow(new org.hgc.suts.gateway.memory.transactions.MemoryTransactionsUnavailableException());
+        var response = mvc.perform(post(path).header("token", "valid-token").contentType(MediaType.TEXT_PLAIN).content("hello"));
+        if (path.endsWith("/async")) {
+            var pending = response.andExpect(request().asyncStarted()).andReturn();
+            pending.getAsyncResult(5000);
+            mvc.perform(asyncDispatch(pending)).andExpect(jsonPath("$.code").value("503"));
+        } else response.andExpect(jsonPath("$.code").value("503"));
+        assertThat(chatRequests).isEmpty();
+        verifyNoInteractions(volunteer, vectors);
     }
     private void reply(String text) {
         replies.add(new JSONObject().set("role", "assistant").set("content", text));

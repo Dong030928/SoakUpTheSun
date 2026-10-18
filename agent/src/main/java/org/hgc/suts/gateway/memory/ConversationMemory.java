@@ -48,16 +48,18 @@ public class ConversationMemory {
         private final String input;
         private final ConversationMemoryStore.Session lease;
         private final List<Message> previous;
+        private MemoryCommitStatus status = MemoryCommitStatus.DISABLED;
 
         private Turn(String id, String input, ConversationMemoryStore.Session lease) {
             this.id = id;
             this.input = input;
             this.lease = lease;
-            try { previous = boundedPairs(lease.repository().findByConversationId(id), properties.getMaxContextChars()); }
+            try { lease.prepare(); previous = boundedPairs(lease.repository().findByConversationId(id), properties.getMaxContextChars()); }
             catch (RuntimeException ex) { lease.close(); throw ex; }
         }
 
         public String id() { return id; }
+        public MemoryCommitStatus status() { return status; }
 
         public void assertValid() { lease.assertValid(); }
 
@@ -81,9 +83,10 @@ public class ConversationMemory {
                 // This is replacement of the prepared snapshot, not a second append of the same turn.
                 ChatMemory window = MessageWindowChatMemory.builder().maxMessages(properties.getMaxMessages()).build();
                 window.add(id, clean);
-                lease.repository().saveAll(id, window.get(id));
-                return true;
+                status = lease.commit(id, input, answer, window.get(id));
+                return status.saved();
             } catch (RuntimeException ex) {
+                status = MemoryCommitStatus.DEGRADED;
                 log.warn("短期会话保存不可用，本轮回复保持有效 ({})", ex.getClass().getSimpleName());
                 return false;
             }

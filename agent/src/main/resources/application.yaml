@@ -57,13 +57,22 @@ suts:
       long-term-chars: ${AI_MEMORY_LONG_TERM_CHARS:2000}
       ttl-seconds: ${AI_MEMORY_TTL_SECONDS:86400}
       lease-ms: ${AI_MEMORY_LEASE_MS:30000}
-      # M01 only prepares archive/recovery services; live chat stays on Redis until M02.
+      # JDBC is optional; live asynchronous archival additionally requires transactions.enabled.
       archive:
         enabled: ${AI_MEMORY_ARCHIVE_ENABLED:false}
         jdbc-url: ${AI_MEMORY_ARCHIVE_JDBC_URL:}
         username: ${AI_MEMORY_ARCHIVE_USERNAME:}
         password: ${AI_MEMORY_ARCHIVE_PASSWORD:}
         migrate: ${AI_MEMORY_ARCHIVE_MIGRATE:false}
+      transactions:
+        enabled: ${AI_MEMORY_TRANSACTIONS_ENABLED:false}
+        name-server: ${AI_MEMORY_MQ_NAME_SERVER:}
+        topic: ${AI_MEMORY_MQ_TOPIC:}
+        producer-group: ${AI_MEMORY_MQ_PRODUCER_GROUP:}
+        consumer-group: ${AI_MEMORY_MQ_CONSUMER_GROUP:}
+        generation: ${AI_MEMORY_REDIS_GENERATION:}
+        evidence-retention-seconds: ${AI_MEMORY_EVIDENCE_RETENTION_SECONDS:0}
+        recovery-window-seconds: ${AI_MEMORY_RECOVERY_WINDOW_SECONDS:0}
       vector:
         enabled: ${AI_MEMORY_VECTOR_ENABLED:true}
         writes-enabled: ${AI_MEMORY_VECTOR_WRITES_ENABLED:true}

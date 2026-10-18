@@ -20,7 +20,7 @@ Redis 登录、视觉与短期会话使用 Spring Data Redis/Lettuce；长期记
 
 已有长期记忆的部署应先阅读 `MEMORY-MIGRATION.md`：新版本使用独立 v2 JSON 索引，不自动读取或覆盖旧 HASH 向量。只切应用而不迁移，会暂时无法召回旧长期记忆。
 
-M01 增加可选 JDBC 归档与离线恢复基础，见 [ARCHIVE-M01.md](ARCHIVE-M01.md)。默认关闭，不要求 MySQL；启用后提供内部归档服务和受控维护命令。当前聊天仍提交 Redis，正式事务消息异步落库由 M02 接入，TTL 双水位及摘要向量检索由 M03 实现。
+M01 增加可选 JDBC 归档与离线恢复基础，见 [ARCHIVE-M01.md](ARCHIVE-M01.md)。M02 已接通 RocketMQ 事务消息、共享回查证据、MySQL 幂等异步落库、对账重投及受控切换/回退，见 [ARCHIVE-M02.md](ARCHIVE-M02.md)。两者默认关闭，原 Redis 模式不需要 MySQL/MQ；事务模式须显式配置并满足持久化、容量与数据切换要求。TTL 双水位及摘要向量检索由 M03 实现。
 
 PR-01 中，Agent 没有数据库 Mapper、SQL 操作或具体 MQ 生产者，因此移除了 MyBatis-Plus、MySQL、RocketMQ 及未被调用的 MQ 抽象模板；用 Spring Data Redis 替代只为 StringRedisTemplate 引入的 Redisson。该次升级仅涉及 Agent；PR-02 另修复 Picture 的视觉上下文链路。
 
@@ -61,7 +61,7 @@ mvn -B -ntp -f agent/pom.xml clean verify
 java -jar agent/target/agent-0.0.1-SNAPSHOT.jar
 ```
 
-启动真实服务前配置自己的 Redis、Nacos 和模型凭证。Agent 不再需要 MySQL、Elasticsearch 或 RocketMQ。求助工具依赖通过服务发现获得的 volunteer 服务，以及其下游服务。
+启动真实服务前配置自己的 Redis、Nacos 和模型凭证。默认模式不要求 MySQL、Elasticsearch 或 RocketMQ；启用事务归档时需要 MySQL 和 RocketMQ。求助工具依赖通过服务发现获得的 volunteer 服务，以及其下游服务。
 
 ## 接口兼容
 
@@ -71,6 +71,7 @@ java -jar agent/target/agent-0.0.1-SNAPSHOT.jar
 - header `token` 或 query 参数 `token` 用于读取现有 User 服务的 Redis 登录记录；Feign 继续向志愿服务透传 `token`。
 - 可选 `X-Conversation-Id` 请求头：1–64 位字母、数字、下划线或连字符，省略时使用当前用户默认会话。服务端将认证用户 ID 与会话标识一起构造存储键；相同名称不会跨用户共享短期记忆。
 - 成功码仍为字符串 `0`，响应数据为 `text/clientCommand/commandData`。客户端动作仍为 `NONE`、`CONNECT_WS`、`DISCONNECT_WS`、`CAPTURE_UPLOAD`、`START_VIDEO_CALL`。
+- 可选响应头 `X-Agent-Memory-Status` 表示记忆接受状态；`accepted/pending` 均不等于 MySQL 已归档，详见 M02 说明。归档依赖或完整恢复不可用时，两种入口均在模型/工具前返回业务码 `503`。
 
 ```sh
 curl -X POST http://localhost:10000/api/agent/chat \

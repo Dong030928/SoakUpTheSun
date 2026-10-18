@@ -30,4 +30,7 @@ public class AiChatRespDTO {
      * 指令附属数据
      */
     private Object commandData;
+
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private org.hgc.suts.gateway.memory.MemoryCommitStatus memoryStatus;
 }

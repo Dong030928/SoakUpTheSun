@@ -174,6 +174,7 @@ class ConversationMemoryTest {
         var failingRepository = mock(RedisConversationMemoryRepository.class);
         when(failingRepository.open(any(String.class))).thenReturn(lease);
         when(lease.repository()).thenReturn(storage);
+        when(lease.commit(any(String.class), any(String.class), any(String.class), anyList())).thenCallRealMethod();
         String id = ConversationMemory.conversationId(42L, "phone");
         when(storage.findByConversationId(id)).thenReturn(List.of(new UserMessage("旧问题"), new AssistantMessage("旧回复")));
         doThrow(new IllegalStateException("Redis unavailable")).when(storage).saveAll(eq(id), anyList());

@@ -79,6 +79,8 @@ public class AiChatController {
 
                 } catch (ConversationBusyException e) {
                     deferredResult.setErrorResult(new Result<AiChatRespDTO>().setCode("409").setMessage("该会话正在处理中，请稍后重试"));
+                } catch (org.hgc.suts.gateway.memory.transactions.MemoryTransactionsUnavailableException e) {
+                    deferredResult.setErrorResult(new Result<AiChatRespDTO>().setCode("503").setMessage("对话记忆暂不可用，请稍后重试"));
                 } catch (Exception e) {
                     log.error("异步任务异常", e);
                     deferredResult.setErrorResult(new Result<AiChatRespDTO>().setCode("500").setMessage("系统繁忙"));

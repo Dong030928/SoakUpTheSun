@@ -24,6 +24,7 @@ public final class ArchiveMaintenance {
         frozen(writersDrained);
         ArchivedTurn.validateIdentity(owner, conversationId, epoch);
         try (var lease = redis.open(conversationId)) {
+            lease.assertNoTransactionEvidence();
             List<Message> messages = lease.repository().findByConversationId(conversationId);
             Assert.state(!messages.isEmpty() && messages.size() % 2 == 0, "No valid complete Redis turns to import");
             List<ArchivedTurn> turns = new ArrayList<>();
@@ -48,6 +49,7 @@ public final class ArchiveMaintenance {
         frozen(writersDrained);
         ArchivedTurn.validateIdentity(owner, conversationId, epoch);
         try (var lease = redis.open(conversationId)) {
+            lease.assertNoTransactionEvidence();
             var snapshot = archive.snapshot(owner, conversationId, epoch).orElseThrow(
                     () -> new IllegalStateException("No confirmed archive for recovery"));
             Assert.state(snapshot.matchesCheckpoint(producerCheckpoint), "Archive does not match the verified producer checkpoint");
@@ -66,6 +68,7 @@ public final class ArchiveMaintenance {
         ArchivedTurn.validateIdentity(owner, id, epoch);
         Assert.isTrue(cutoff > 0, "An explicit retention cutoff is required");
         try (var lease = redis.open(id)) {
+            lease.assertNoTransactionEvidence();
             // Keep a tombstone so late messages cannot recreate this archived epoch.
             lease.assertValid();
             if (dryRun) {

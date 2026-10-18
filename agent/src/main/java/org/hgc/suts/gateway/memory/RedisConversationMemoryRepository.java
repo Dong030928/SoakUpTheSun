@@ -118,6 +118,22 @@ public class RedisConversationMemoryRepository implements ConversationMemoryStor
             return repository;
         }
 
+        /** Internal capability used by the transaction script; never sent to MQ or an HTTP client. */
+        public String fencingToken() { assertValid(); return token; }
+
+        @Override public void prepare() {
+            assertValid();
+            if (!Boolean.FALSE.equals(redis.hasKey(key(conversationId, "transactions")))) {
+                throw new org.hgc.suts.gateway.memory.transactions.MemoryTransactionsUnavailableException();
+            }
+        }
+
+        public void assertNoTransactionEvidence() {
+            assertValid();
+            Assert.state(Boolean.FALSE.equals(redis.hasKey(key(conversationId, "transactions"))),
+                    "Transaction evidence exists: use verified transaction maintenance after draining MQ");
+        }
+
         public boolean hasStoredSnapshot() {
             assertValid();
             // Corruption is not absence: recovery must not silently overwrite an unreadable record.
@@ -200,6 +216,7 @@ public class RedisConversationMemoryRepository implements ConversationMemoryStor
             public void saveAll(String candidate, List<Message> messages) {
                 requireBoundConversation(candidate);
                 assertValid();
+                assertNoTransactionEvidence();
                 Assert.state(snapshotReadable, "Cannot replace a conversation snapshot that could not be read");
                 String payload = encode(messages, conversationId);
                 fencedMutation(SAVE, token, payload, Long.toString(ttlMs));
@@ -209,6 +226,7 @@ public class RedisConversationMemoryRepository implements ConversationMemoryStor
             public void deleteByConversationId(String candidate) {
                 requireBoundConversation(candidate);
                 assertValid();
+                assertNoTransactionEvidence();
                 fencedMutation(DELETE, token);
             }
 
@@ -230,7 +248,7 @@ public class RedisConversationMemoryRepository implements ConversationMemoryStor
         }
     }
 
-    private static String encode(List<Message> messages, String conversationId) {
+    public static String encode(List<Message> messages, String conversationId) {
         Assert.notNull(messages, "Messages must be provided");
         Assert.isTrue(messages.size() <= MAX_MESSAGES && messages.size() % 2 == 0,
                 "Memory must contain bounded, complete user and assistant pairs");
@@ -287,7 +305,7 @@ public class RedisConversationMemoryRepository implements ConversationMemoryStor
         return List.copyOf(messages);
     }
 
-    private static String key(String conversationId, String suffix) {
+    public static String key(String conversationId, String suffix) {
         return PREFIX + "{" + conversationId + "}:" + suffix;
     }
 

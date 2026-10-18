@@ -25,6 +25,9 @@ import java.util.Optional;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(org.hgc.suts.gateway.memory.transactions.MemoryTransactionsUnavailableException.class)
+    public Result memoryUnavailable() { return Results.failure("503", "对话记忆暂不可用，请稍后重试"); }
+
     @ExceptionHandler(ConversationBusyException.class)
     public Result conversationBusy(ConversationBusyException ex) {
         return Results.failure("409", "该会话正在处理中，请稍后重试");
