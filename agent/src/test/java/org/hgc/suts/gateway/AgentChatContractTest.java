@@ -10,6 +10,9 @@ import org.hgc.suts.gateway.common.constant.RedisCacheConstant;
 import org.hgc.suts.gateway.common.web.GlobalExceptionHandler;
 import org.hgc.suts.gateway.common.web.Results;
 import org.hgc.suts.gateway.config.AiConfig;
+import org.hgc.suts.gateway.config.MemoryProperties;
+import org.hgc.suts.gateway.memory.ConversationMemory;
+import org.hgc.suts.gateway.memory.RedisConversationMemoryRepository;
 import org.hgc.suts.gateway.config.AiModelConfiguration;
 import org.hgc.suts.gateway.manager.VisionContextManager;
 import org.hgc.suts.gateway.controller.AiChatController;
@@ -63,6 +66,8 @@ class AgentChatContractTest {
     private ChatClient chatClient;
     private AiConfig config;
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class, RETURNS_DEEP_STUBS);
+    private final RedisConversationMemoryRepository conversations = ConversationMemoryFixture.fake();
+    private final MemoryProperties memoryProperties = new MemoryProperties();
     private final VectorStorageService vectors = mock(VectorStorageService.class);
     private final VolunteerRemoteService volunteer = mock(VolunteerRemoteService.class);
     private final ExecutorService workers = Executors.newSingleThreadExecutor();
@@ -116,9 +121,9 @@ class AgentChatContractTest {
         chatClient = models.agentChatClient(models.agentChatModel(config));
         manager = new AiModelManager(chatClient,
                 models.agentEmbeddingModel(config), config);
-        ChatMemoryManager memory = new ChatMemoryManager(redis, vectors, manager);
-        when(vectors.searchMemory(eq(42L), anyList(), eq(10))).thenReturn(List.of("用户喜欢苹果"));
-        service = new AiChatServiceImpl(chatClient, new AgentTools(volunteer), new VisionContextManager(redis), memory);
+        ChatMemoryManager memory = new ChatMemoryManager(vectors, Runnable::run, memoryProperties, new org.hgc.suts.gateway.config.MemoryVectorProperties());
+        when(vectors.searchMemory(eq(42L), anyString(), eq(6))).thenReturn(List.of("用户喜欢苹果"));
+        service = new AiChatServiceImpl(chatClient, new AgentTools(volunteer), new VisionContextManager(redis), memory, new ConversationMemory(conversations, memoryProperties), memoryProperties);
         LoginInterceptor login = new LoginInterceptor();
         ReflectionTestUtils.setField(login, "stringRedisTemplate", redis);
         when(redis.opsForValue().get(RedisCacheConstant.USER_LOGIN_KEY_TOKEN_TO_USER + "valid-token"))
@@ -151,15 +156,14 @@ class AgentChatContractTest {
         assertThat(request.getDouble("temperature")).isEqualTo(0.7);
         assertThat(request.getJSONArray("messages").getJSONObject(1).getStr("content")).contains("用户喜欢苹果");
         assertThat(request.getJSONArray("messages").getJSONObject(1).getStr("content")).startsWith("你好");
-        verify(vectors).saveMemory(eq(42L), eq("User: 你好\nAI: 您好"), argThat(v ->
-                v.size() == 3 && Math.abs(v.get(0) - 0.1) < 1e-6 && Math.abs(v.get(2) - 0.3) < 1e-6));
+        verify(vectors).saveMemory(eq(42L), eq("User: 你好\nAI: 您好"));
         assertThat(UserContext.getUserId()).isNull();
     }
 
     @Test
     void jsonBodyRemainsAnUnparsedString() throws Exception {
         reply("收到");
-        when(vectors.searchMemory(eq(42L), anyList(), eq(10))).thenReturn(List.of());
+        when(vectors.searchMemory(eq(42L), anyString(), eq(6))).thenReturn(List.of());
         String body = "{\"userDescription\":\"你好\"}";
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.APPLICATION_JSON).content(body))
@@ -177,7 +181,7 @@ class AgentChatContractTest {
         mvc.perform(asyncDispatch(pending)).andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("0"))
                 .andExpect(jsonPath("$.data.text").value("异步回复"));
-        verify(vectors).saveMemory(eq(42L), contains("hello"), anyList());
+        verify(vectors).saveMemory(eq(42L), contains("hello"));
     }
 
     @ParameterizedTest
@@ -257,7 +261,7 @@ class AgentChatContractTest {
     @Test
     void saturatedExecutorKeepsAsyncServiceUnavailableCode() {
         AiChatController controller = new AiChatController(service, task -> { throw new RejectedExecutionException(); });
-        assertThat(controller.chatAsync("hello").getResult()).extracting("code").isEqualTo("503");
+        assertThat(controller.chatAsync("hello", null).getResult()).extracting("code").isEqualTo("503");
     }
 
     @ParameterizedTest
@@ -291,13 +295,14 @@ class AgentChatContractTest {
     }
 
     @Test
-    void embeddingFailureSkipsMemoryButStillAnswers() throws Exception {
-        embeddingStatus.set(503);
+    void longTermFailureStillAnswersAndKeepsShortTermMemory() throws Exception {
+        when(vectors.searchMemory(anyLong(), anyString(), anyInt())).thenThrow(new IllegalStateException("fixture vector failure"));
+        doThrow(new IllegalStateException("fixture write failure")).when(vectors).saveMemory(anyLong(), anyString());
         reply("降级回复");
         mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                         .contentType(MediaType.TEXT_PLAIN).content("hello"))
                 .andExpect(jsonPath("$.data.text").value("降级回复"));
-        verifyNoInteractions(vectors);
+        verify(vectors).saveMemory(eq(42L), contains("降级回复"));
     }
 
     @Test
@@ -483,6 +488,73 @@ class AgentChatContractTest {
     private org.springframework.test.web.servlet.ResultActions chat(String input) throws Exception {
         return mvc.perform(post("/api/agent/chat").header("token", "valid-token")
                 .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content(input));
+    }
+
+    @Test
+    void consecutiveQuestionsRecallOnlyTheAuthenticatedConversation() throws Exception {
+        reply("记住了");
+        mvc.perform(post("/api/agent/chat").header("token", "valid-token").header("X-Conversation-Id", "alpha")
+                .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content("我喜欢火龙果"))
+                .andExpect(jsonPath("$.code").value("0"));
+        reply("火龙果");
+        mvc.perform(post("/api/agent/chat").header("token", "valid-token").header("X-Conversation-Id", "alpha")
+                .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content("我喜欢什么"))
+                .andExpect(jsonPath("$.data.text").value("火龙果"));
+        assertThat(chatRequests.stream().skip(1).findFirst().orElseThrow().getJSONArray("messages").getJSONObject(1).getStr("content"))
+                .isEqualTo("我喜欢火龙果");
+        reply("还不知道");
+        mvc.perform(post("/api/agent/chat/async").header("token", "valid-token").header("X-Conversation-Id", "beta")
+                .contentType(MediaType.TEXT_PLAIN).characterEncoding("UTF-8").content("我喜欢什么"))
+                .andExpect(request().asyncStarted()).andReturn().getAsyncResult(5000);
+        assertThat(chatRequests.stream().skip(2).findFirst().orElseThrow().getJSONArray("messages").toString())
+                .doesNotContain("火龙果");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/agent/chat", "/api/agent/chat/async"})
+    void overlappingConversationRequestsHaveAnExplicitBusyResult(String path) throws Exception {
+        when(conversations.open(anyString())).thenThrow(new org.hgc.suts.gateway.memory.ConversationBusyException());
+        var result = mvc.perform(post(path).header("token", "valid-token").contentType(MediaType.TEXT_PLAIN).content("hello"));
+        if (path.endsWith("/async")) {
+            MvcResult pending = result.andExpect(request().asyncStarted()).andReturn();
+            pending.getAsyncResult(5000);
+            mvc.perform(asyncDispatch(pending)).andExpect(jsonPath("$.code").value("409"));
+        } else result.andExpect(jsonPath("$.code").value("409"));
+        assertThat(chatRequests).isEmpty();
+        verifyNoInteractions(volunteer);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"../other-user", "user:42", "invalid session"})
+    void unsafeConversationHeadersNeverReachTheModel(String session) throws Exception {
+        mvc.perform(post("/api/agent/chat").header("token", "valid-token").header("X-Conversation-Id", session)
+                .contentType(MediaType.TEXT_PLAIN).content("hello"))
+                .andExpect(jsonPath("$.code").value("A000001"));
+        assertThat(chatRequests).isEmpty();
+        verifyNoInteractions(volunteer);
+    }
+
+    @Test
+    void excessiveInputIsRejectedBeforeMemoryOrTools() throws Exception {
+        memoryProperties.setMaxInputChars(3);
+        chat("too-long").andExpect(jsonPath("$.code").value("A000001"));
+        assertThat(chatRequests).isEmpty();
+        verifyNoInteractions(volunteer, vectors);
+    }
+
+    @Test
+    void lostCommitKeepsTheExecutedActionButDoesNotEnqueueStaleLongTermMemory() throws Exception {
+        var lease = mock(RedisConversationMemoryRepository.Lease.class);
+        var repository = mock(org.springframework.ai.chat.memory.ChatMemoryRepository.class);
+        when(lease.repository()).thenReturn(repository);
+        when(repository.findByConversationId(anyString())).thenReturn(List.of());
+        doThrow(new org.hgc.suts.gateway.memory.MemoryLeaseLostException()).when(repository).saveAll(anyString(), anyList());
+        when(conversations.open(anyString())).thenReturn(lease);
+        toolCall("request_client_action", "{\"action\":\"CAPTURE_UPLOAD\"}");
+        reply("等待上传");
+        chat("拍照").andExpect(jsonPath("$.code").value("0"))
+                .andExpect(jsonPath("$.data.clientCommand").value("CAPTURE_UPLOAD"));
+        verify(vectors, never()).saveMemory(anyLong(), anyString());
     }
     private void reply(String text) {
         replies.add(new JSONObject().set("role", "assistant").set("content", text));

@@ -12,5 +12,7 @@ public interface AiChatService {
      * @param userQuestion 用户输入的自然语言
      * @return 最终给用户的回复
      */
-    AiChatRespDTO executeChat(String userQuestion);
+    default AiChatRespDTO executeChat(String userQuestion) { return executeChat(userQuestion, null); }
+
+    AiChatRespDTO executeChat(String userQuestion, String conversationId);
 }

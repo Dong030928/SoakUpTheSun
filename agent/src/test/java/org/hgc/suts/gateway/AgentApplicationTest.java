@@ -23,7 +23,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import redis.clients.jedis.JedisPooled;
+import redis.clients.jedis.RedisClient;
+import org.hgc.suts.gateway.memory.RedisConversationMemoryRepository;
+import org.hgc.suts.gateway.service.impl.RedisVectorStorageServiceImpl;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
@@ -55,7 +57,9 @@ class AgentApplicationTest {
     @Autowired NacosDiscoveryClient discovery;
     @Autowired JsonMapper mapper;
     @MockitoBean StringRedisTemplate redis;
-    @MockitoBean JedisPooled jedis;
+    @MockitoBean RedisClient memoryRedisClient;
+    @MockitoBean RedisConversationMemoryRepository conversations;
+    @MockitoBean RedisVectorStorageServiceImpl vectors;
     @MockitoBean AiModelManager model;
     @MockitoBean NacosServiceManager nacos;
     private final HttpClient http = HttpClient.newHttpClient();
@@ -105,6 +109,7 @@ class AgentApplicationTest {
         when(values.get(RedisCacheConstant.USER_LOGIN_KEY_TOKEN_TO_USER + "fixture-token")).thenReturn("fixture");
         when(hashes.get(RedisCacheConstant.USER_LOGIN_KEY_USER_TO_TOKEN + "fixture", "fixture-token"))
                 .thenReturn("{\"id\":42,\"userAccount\":\"fixture\"}");
+        ConversationMemoryFixture.configure(conversations);
         MODEL.reset("应用启动成功");
         MODEL.text("应用启动成功");
         when(model.embed(anyString())).thenReturn(java.util.Collections.nCopies(1024, 0.0));

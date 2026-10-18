@@ -48,8 +48,15 @@ suts:
     vector:
       # 必须与当前 Embedding 模型及既有 Redis 索引一致
       dimension: ${AI_VECTOR_DIMENSION:1024}
-    chat:
-      # 用户上下文长度
-      max-context-char-limit: 4000
-      # Redis 里最多保留多少条物理数据
-      redis-physical-limit: 50
+    memory:
+      writes-enabled: ${AI_MEMORY_WRITES_ENABLED:true}
+      max-messages: ${AI_MEMORY_MAX_MESSAGES:20}
+      max-input-chars: ${AI_MEMORY_MAX_INPUT_CHARS:4000}
+      max-message-chars: ${AI_MEMORY_MAX_MESSAGE_CHARS:4000}
+      max-context-chars: ${AI_MEMORY_MAX_CONTEXT_CHARS:12000}
+      long-term-chars: ${AI_MEMORY_LONG_TERM_CHARS:2000}
+      ttl-seconds: ${AI_MEMORY_TTL_SECONDS:86400}
+      lease-ms: ${AI_MEMORY_LEASE_MS:30000}
+      vector:
+        enabled: ${AI_MEMORY_VECTOR_ENABLED:true}
+        writes-enabled: ${AI_MEMORY_VECTOR_WRITES_ENABLED:true}

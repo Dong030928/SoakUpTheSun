@@ -3,8 +3,13 @@ package org.hgc.suts.gateway;
 import cn.hutool.json.JSONUtil;
 import org.hgc.suts.gateway.common.constant.RedisCacheConstant;
 import org.hgc.suts.gateway.manager.AiModelManager;
-import org.hgc.suts.gateway.manager.VectorIndexManager;
-import org.hgc.suts.gateway.service.VectorStorageService;
+import org.hgc.suts.gateway.service.impl.RedisVectorStorageServiceImpl;
+import org.hgc.suts.gateway.memory.ConversationMemory;
+import org.hgc.suts.gateway.memory.ConversationBusyException;
+import org.hgc.suts.gateway.memory.MemoryLeaseLostException;
+import org.hgc.suts.gateway.memory.RedisConversationMemoryRepository;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,7 +21,7 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import redis.clients.jedis.JedisPooled;
+import redis.clients.jedis.RedisClient;
 
 import java.net.ServerSocket;
 import java.net.URI;
@@ -44,11 +49,12 @@ class LocalRedisIT {
     private static final ModelHttpFixture MODEL = new ModelHttpFixture();
     @LocalServerPort int port;
     @Autowired StringRedisTemplate redis;
-    @Autowired JedisPooled jedis;
+    @Autowired RedisClient jedis;
     @Autowired org.hgc.suts.gateway.manager.VisionContextManager vision;
+    @Autowired RedisConversationMemoryRepository conversations;
+    @Autowired ConversationMemory conversationMemory;
     @MockitoBean AiModelManager model;
-    @MockitoBean VectorIndexManager index;
-    @MockitoBean VectorStorageService vectors;
+    @MockitoBean RedisVectorStorageServiceImpl vectors;
 
     @DynamicPropertySource
     static void redisProperties(DynamicPropertyRegistry properties) {
@@ -138,5 +144,85 @@ class LocalRedisIT {
         redis.opsForValue().set(key, "{broken");
         assertThat(redis.execute(script, java.util.List.of(key), current, "" + timestamp, "300000")).isEqualTo(1);
         assertThat(vision.getRecentVision(42L)).isEqualTo("新图像");
+    }
+
+    @Test
+    void conversationSurvivesRepositoryRestartAndSeparatesUsersAndSessions() {
+        String id = ConversationMemory.conversationId(701L, "test");
+        try (var turn = conversationMemory.open(701L, "test", "我喜欢苹果")) { turn.commit("记住了"); }
+        var restarted = new RedisConversationMemoryRepository(redis, 30000, 60);
+        try {
+            try (var lease = restarted.open(id)) {
+                var messages = lease.repository().findByConversationId(id);
+                assertThat(messages).hasSize(2);
+                assertThat(messages.get(0).getText()).isEqualTo("我喜欢苹果");
+                assertThat(messages.get(1).getText()).isEqualTo("记住了");
+            }
+            for (String other : new String[]{ConversationMemory.conversationId(702L, "test"),
+                    ConversationMemory.conversationId(701L, "another")}) {
+                try (var lease = restarted.open(other)) { assertThat(lease.repository().findByConversationId(other)).isEmpty(); }
+            }
+            assertThat(redis.getExpire("suts:agent:memory:v2:{" + id + "}:messages", java.util.concurrent.TimeUnit.SECONDS))
+                    .isBetween(1L, 86400L);
+        } finally { restarted.destroy(); }
+    }
+
+    @Test
+    void twoRepositoryInstancesSerializeTurnsAndFenceAStaleHolder() {
+        String id = ConversationMemory.conversationId(703L, "lease");
+        String lock = "suts:agent:memory:v2:{" + id + "}:lock";
+        var secondInstance = new RedisConversationMemoryRepository(redis, 30000, 60);
+        try (var owner = conversations.open(id)) {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> secondInstance.open(id)).isInstanceOf(ConversationBusyException.class);
+            owner.repository().saveAll(id, java.util.List.of(new UserMessage("question"), new AssistantMessage("answer")));
+            redis.opsForValue().set(lock, "replacement-lease", Duration.ofSeconds(30));
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> owner.repository().saveAll(id,
+                    java.util.List.of(new UserMessage("stale"), new AssistantMessage("must not overwrite"))))
+                    .isInstanceOf(MemoryLeaseLostException.class);
+        } finally { secondInstance.destroy(); }
+        assertThat(redis.opsForValue().get(lock)).isEqualTo("replacement-lease");
+        assertThat(redis.opsForValue().get("suts:agent:memory:v2:{" + id + "}:messages")).contains("question").doesNotContain("stale");
+        redis.delete(lock);
+    }
+
+    @Test
+    void renewableLeaseRemainsOwnedAndShortMemoryExpiresByTtl() throws Exception {
+        String id = ConversationMemory.conversationId(704L, "ttl");
+        var shortTtl = new RedisConversationMemoryRepository(redis, 1000, 1);
+        var another = new RedisConversationMemoryRepository(redis, 1000, 1);
+        try {
+            try (var lease = shortTtl.open(id)) {
+                lease.repository().saveAll(id, java.util.List.of(new UserMessage("question"), new AssistantMessage("answer")));
+                Thread.sleep(1700);
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> another.open(id)).isInstanceOf(ConversationBusyException.class);
+                assertThat(lease.repository().findByConversationId(id)).isEmpty();
+                lease.assertValid();
+            }
+            try (var lease = another.open(id)) { lease.assertValid(); }
+        } finally { shortTtl.destroy(); another.destroy(); }
+    }
+
+    @Test
+    void toolTranscriptAndVisualReferenceAreNotStoredInTheUserMessage() throws Exception {
+        redis.opsForValue().set(RedisCacheConstant.USER_LOGIN_KEY_TOKEN_TO_USER + "privacy-token", "privacy-user");
+        redis.opsForHash().put(RedisCacheConstant.USER_LOGIN_KEY_USER_TO_TOKEN + "privacy-user", "privacy-token",
+                "{\"id\":705,\"userAccount\":\"privacy-user\"}");
+        redis.opsForValue().set(String.format(RedisCacheConstant.AGENT_VISION_CONTEXT_KEY, 705L),
+                new cn.hutool.json.JSONObject().set("schemaVersion", 1).set("userId", 705L)
+                        .set("text", "visual-reference-fixture").set("timestamp", System.currentTimeMillis()).toString());
+        MODEL.messages.clear();
+        MODEL.requests.clear();
+        MODEL.tool("request_client_action", "{\"action\":\"CAPTURE_UPLOAD\"}");
+        MODEL.text("等待客户端上传");
+        var response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/agent/chat/async"))
+                .header("token", "privacy-token").header("X-Conversation-Id", "private")
+                .header("Content-Type", "text/plain;charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("请重新拍照")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(JSONUtil.parseObj(response.body()).getJSONObject("data").getStr("clientCommand")).isEqualTo("CAPTURE_UPLOAD");
+        assertThat(MODEL.requests.peek().toString()).contains("visual-reference-fixture");
+        String id = ConversationMemory.conversationId(705L, "private");
+        String saved = redis.opsForValue().get("suts:agent:memory:v2:{" + id + "}:messages");
+        assertThat(saved).contains("请重新拍照", "等待客户端上传")
+                .doesNotContain("visual-reference-fixture", "privacy-token", "tool_calls", "request_client_action", "schemaVersion\":1");
     }
 }

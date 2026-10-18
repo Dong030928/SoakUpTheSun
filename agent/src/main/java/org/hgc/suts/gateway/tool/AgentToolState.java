@@ -12,20 +12,27 @@ public final class AgentToolState {
     public static final String CONTEXT_KEY = "suts.agent.turn";
     private final Long userId;
     private final String token;
+    private final Runnable executionGuard;
     private String operation;
     private String toolResult;
     private String clientCommand = "NONE";
     private TargetRoomLinkInfoRespDTO commandData;
 
     public AgentToolState(Long userId, String token) {
+        this(userId, token, () -> { });
+    }
+
+    public AgentToolState(Long userId, String token, Runnable executionGuard) {
         Assert.notNull(userId, "Authenticated user is required");
         this.userId = userId;
         this.token = token;
+        this.executionGuard = executionGuard;
     }
 
     void verifyAuthentication() {
         Assert.state(userId.equals(UserContext.getUserId()) && Objects.equals(token, UserContext.getToken()),
                 "Tool authentication does not match this turn");
+        executionGuard.run();
     }
 
     /** A repeated call reuses its result; conflicting actions cannot replace an executed action. */

@@ -74,6 +74,18 @@ class AgentToolsTest {
         assertThat(next.response("你好").getCommandData()).isNull();
     }
 
+    @Test
+    void lostConversationLeasePreventsNewSideEffects() {
+        authenticate(42L);
+        var turn = new AgentToolState(42L, UserContext.getToken(), () -> {
+            throw new org.hgc.suts.gateway.memory.MemoryLeaseLostException();
+        });
+        assertThatThrownBy(() -> tools.createVolunteerHelp(context(turn)))
+                .isInstanceOf(org.hgc.suts.gateway.memory.MemoryLeaseLostException.class);
+        assertThat(turn.response("lease lost").getClientCommand()).isEqualTo("NONE");
+        verifyNoInteractions(volunteer);
+    }
+
     private org.hgc.suts.gateway.dto.resp.AiChatRespDTO help(Long userId) {
         authenticate(userId);
         try {
