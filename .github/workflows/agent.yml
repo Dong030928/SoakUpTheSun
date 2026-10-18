@@ -16,6 +16,35 @@ permissions:
   contents: read
 
 jobs:
+  verify-memory-transactions:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+          cache-dependency-path: agent/pom.xml
+      - name: Start isolated durable Redis, MySQL and RocketMQ
+        run: bash agent/src/test/fixtures/memory-transactions/start.sh
+      - name: Verify transaction acceptance, checkback and archival recovery
+        run: mvn -B -ntp -f agent/pom.xml verify -Pmemory-transactions -Dmemory.transactions.fixture=agent-transactions-integration-only
+      - name: Stop and remove only the isolated transaction fixtures
+        if: always()
+        run: docker compose -f agent/src/test/fixtures/memory-transactions/compose.yaml down --volumes
+      - name: Upload transaction test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-memory-transactions-java-${{ matrix.java }}
+          path: |
+            agent/target/surefire-reports/
+            agent/target/failsafe-reports/
   verify-mysql-archive:
     runs-on: ubuntu-latest
     steps:

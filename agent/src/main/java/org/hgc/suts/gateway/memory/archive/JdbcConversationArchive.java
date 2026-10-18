@@ -59,6 +59,15 @@ public final class JdbcConversationArchive implements ConversationArchive {
     public Statistics statistics() { return new Statistics(applied.sum(), duplicates.sum(), failed.sum(), elapsed.sum()); }
     public record Statistics(long appliedEvents, long duplicateEvents, long failedCalls, long archiveCallNanos) { }
 
+    /** A committed consumption log, not a speculative highest-seen sequence, repairs a lost Redis receipt. */
+    public boolean hasApplied(ArchivedTurn turn) {
+        List<String> hashes = jdbc.query("SELECT payload_hash FROM memory_log WHERE event_id = ? AND state = 'APPLIED'",
+                (rs, i) -> rs.getString(1), turn.eventId());
+        if (hashes.isEmpty()) return false;
+        Assert.state(hashes.get(0).equals(turn.payloadHash()), "Archive event ID conflicts with existing content");
+        return true;
+    }
+
     /** Import is all-or-nothing; dry-run simulates validation in the same transaction and rolls it back. */
     public int importTurns(List<ArchivedTurn> turns, boolean dryRun) {
         Assert.isTrue(turns != null && !turns.isEmpty() && turns.size() <= 500, "Import requires 1..500 complete turns");

@@ -24,6 +24,7 @@
         <springdoc.version>3.0.3</springdoc.version>
         <hutool.version>5.8.27</hutool.version>
         <spring-ai.version>2.0.1</spring-ai.version>
+        <rocketmq.version>5.4.0</rocketmq.version>
     </properties>
 
     <dependencyManagement>
@@ -53,6 +54,17 @@
     </dependencyManagement>
 
     <dependencies>
+        <!-- Plain client: lifecycle is managed here; no incompatible Boot starter auto-configuration. -->
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-client</artifactId>
+            <version>${rocketmq.version}</version>
+            <exclusions>
+                <!-- Spring AI's OpenAI SDK uses okhttp 4; do not load a second okhttp 5 implementation. -->
+                <exclusion><groupId>com.squareup.okhttp3</groupId><artifactId>okhttp-jvm</artifactId></exclusion>
+                <exclusion><groupId>com.squareup.okio</groupId><artifactId>okio-jvm</artifactId></exclusion>
+            </exclusions>
+        </dependency>
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-deepseek</artifactId>
@@ -184,6 +196,22 @@
     </build>
 
     <profiles>
+        <profile>
+            <id>memory-transactions</id>
+            <properties>
+                <!-- Exercise application-context cleanup before the protocol fault tests on every platform. -->
+                <failsafe.runOrder>alphabetical</failsafe.runOrder>
+            </properties>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration><runOrder>${failsafe.runOrder}</runOrder><includes combine.children="append">
+                    <include>**/MemoryTransactionsIT.java</include>
+                    <include>**/TransactionApplicationIT.java</include>
+                </includes></configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
         <profile>
             <id>mysql-archive</id>
             <build><plugins><plugin>
