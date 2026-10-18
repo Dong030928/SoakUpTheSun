@@ -198,10 +198,14 @@
     <profiles>
         <profile>
             <id>memory-transactions</id>
+            <properties>
+                <!-- Exercise application-context cleanup before the protocol fault tests on every platform. -->
+                <failsafe.runOrder>alphabetical</failsafe.runOrder>
+            </properties>
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
-                <configuration><includes combine.children="append">
+                <configuration><runOrder>${failsafe.runOrder}</runOrder><includes combine.children="append">
                     <include>**/MemoryTransactionsIT.java</include>
                     <include>**/TransactionApplicationIT.java</include>
                 </includes></configuration>

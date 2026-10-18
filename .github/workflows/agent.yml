@@ -19,6 +19,7 @@ jobs:
   verify-memory-transactions:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         java: ['17', '21']
     steps:

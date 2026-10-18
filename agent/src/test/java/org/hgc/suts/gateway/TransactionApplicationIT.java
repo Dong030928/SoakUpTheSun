@@ -20,6 +20,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
@@ -48,6 +49,8 @@ import static org.mockito.ArgumentMatchers.*;
         "suts.ai.memory.transactions.recovery-window-seconds=60",
         "suts.ai.memory.transactions.redrive-after-ms=1000", "suts.ai.memory.transactions.reconcile-interval-ms=1000"
 })
+// Closing the cached context also stops its MQ clients and reconciler before protocol fault tests run.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class TransactionApplicationIT {
     private static final ModelHttpFixture MODEL = new ModelHttpFixture();
     private static final String RUN = UUID.randomUUID().toString();

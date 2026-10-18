@@ -51,3 +51,15 @@ Java 17 的最终全量运行包含实际 Cluster 连接门禁和真实 MySQL �
 新增 `verify-memory-transactions` 的 Java 17/21 矩阵，自动创建并清理私有 Redis/MySQL/RocketMQ，上传 Surefire/Failsafe 报告；保留原有 Java 17/21、MySQL、向量、Picture job。本地通过不能代替远端 Actions 状态，推送后以 GitHub 结果为准。
 
 未执行生产迁移、真实供应商质量/费用评测、公开网络 ACL/TLS、Redis Cluster、磁盘永久损坏恢复或跨 HTTP 请求的业务幂等验证。M02 的单节点 Redis 前提、保留参数、观测计数含义和回退步骤见 [ARCHIVE-M02.md](ARCHIVE-M02.md)。
+
+## CI 测试顺序隔离修复
+
+首次上游 [PR #31 检查](https://github.com/XXieYiqiang/SoakUpTheSun/actions/runs/39118052712) 的 Java 17/21 日志均出现同两项失败：`anotherProducerResolvesUnknownCommitFromSharedEvidence` 的回查计数为 0，以及 `brokerCheckExhaustionKeepsProofAndSameEventCanBeRedriven` 的事件提前落库。Java 21 job 最终还受到矩阵 fail-fast 取消标记影响。
+
+根因是测试资源未隔离：Linux 先执行 `TransactionApplicationIT`，Spring 缓存的应用上下文没有随测试类结束关闭，真实后台对账器继续扫描后续 `MemoryTransactionsIT` 的事件并重投。测试期望等待 Broker 回查/耗尽时，另一条合法归档路径已经生效。原 Windows 文件顺序先跑协议测试，因而未暴露该问题。
+
+在修复前，本机强制 `-Dfailsafe.runOrder=alphabetical`，只运行 HTTP 基础场景与上述两个协议场景，得到 3 项中的同 2 项失败，复现了 CI。
+
+修复为：应用集成测试标注 `@DirtiesContext(AFTER_CLASS)`，关闭其 MQ 客户端、对账调度器和 Redis 资源；事务 profile 默认按字母序执行，持续覆盖原故障顺序，仍可通过标准 Failsafe 属性反序验证；CI 矩阵 `fail-fast=false`，两种 JDK 独立报告。保留原故障断言，没有关闭生产对账功能或放宽成功条件。
+
+修复后本机 Java 17 使用事务 profile 默认字母序，Java 21 使用 `-Dfailsafe.runOrder=reversealphabetical`，分别执行 `mvn ... verify -Pmemory-transactions -Dmemory.transactions.fixture=agent-transactions-integration-only`。两轮均为 231 普通测试＋25 真实事务/HTTP 集成测试通过；正序日志确认应用上下文已关闭后才进入协议测试。业务生产代码未改动。远端结果以补充提交触发的 Actions 为准。
