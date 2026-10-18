@@ -22,6 +22,8 @@ public final class ConversationMemoryFixture {
         when(target.open(anyString())).thenAnswer(invocation -> {
             RedisConversationMemoryRepository.Lease lease = mock(RedisConversationMemoryRepository.Lease.class);
             when(lease.repository()).thenReturn(storage);
+            String id = invocation.getArgument(0);
+            when(lease.hasStoredSnapshot()).thenAnswer(ignored -> !storage.findByConversationId(id).isEmpty());
             return lease;
         });
     }

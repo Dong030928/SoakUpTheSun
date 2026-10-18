@@ -43,6 +43,51 @@ import static org.mockito.Mockito.when;
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class LocalRedisIT {
+    @Test
+    void archivedTurnsRestoreOnlyMissingHotRecordsWithAnExplicitCheckpoint() {
+        var database = org.hgc.suts.gateway.memory.archive.ArchiveDatabaseFixture.h2();
+        var settings = new org.hgc.suts.gateway.config.MemoryProperties();
+        settings.setWritesEnabled(false);
+        var operations = new org.hgc.suts.gateway.memory.archive.ArchiveMaintenance(database.archive, conversations, settings);
+        String id = ConversationMemory.conversationId(82301L, "archive-recovery");
+        try (var lease = conversations.open(id)) {
+            lease.repository().saveAll(id, java.util.List.of(new UserMessage("我喜欢火龙果"), new AssistantMessage("已记录")));
+        }
+        assertThat(operations.importRecent(82301, id, 1, true, true)).isEqualTo(1);
+        assertThat(database.archive.snapshot(82301, id, 1)).isEmpty();
+        assertThat(operations.importRecent(82301, id, 1, true, false)).isEqualTo(1);
+        assertThat(operations.importRecent(82301, id, 1, true, false)).isZero();
+        assertThat(operations.restore(82301, id, 1, 1, true)).isFalse();
+        try (var lease = conversations.open(id)) { lease.repository().deleteByConversationId(id); }
+        redis.opsForValue().set("suts:agent:memory:v2:{" + id + "}:messages", "corrupt-record");
+        assertThat(operations.restore(82301, id, 1, 1, true, true)).isFalse();
+        assertThat(operations.restore(82301, id, 1, 1, true)).isFalse();
+        redis.delete("suts:agent:memory:v2:{" + id + "}:messages");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> operations.restore(82301, id, 1, 2, true))
+                .hasMessageContaining("checkpoint");
+        assertThat(operations.restore(82301, id, 1, 1, true)).isTrue();
+        try (var lease = conversations.open(id)) {
+            assertThat(lease.repository().findByConversationId(id)).extracting(org.springframework.ai.chat.messages.Message::getText)
+                    .containsExactly("我喜欢火龙果", "已记录");
+            lease.repository().saveAll(id, java.util.List.of(new UserMessage("更新的热点记录"), new AssistantMessage("新回复")));
+        }
+        assertThat(operations.restore(82301, id, 1, 1, true)).isFalse();
+        try (var lease = conversations.open(id)) {
+            assertThat(lease.repository().findByConversationId(id).get(0).getText()).isEqualTo("更新的热点记录");
+        }
+    }
+
+    @Test
+    void staleLeaseCannotRestoreAnEmptyCache() {
+        String id = ConversationMemory.conversationId(82302L, "stale-recovery");
+        try (var lease = conversations.open(id)) {
+            redis.opsForValue().set("suts:agent:memory:v2:{" + id + "}:lock", "new-owner", Duration.ofSeconds(30));
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> lease.restoreIfMissing(java.util.List.of(
+                    new UserMessage("旧数据"), new AssistantMessage("旧回复")))).isInstanceOf(MemoryLeaseLostException.class);
+            assertThat(redis.hasKey("suts:agent:memory:v2:{" + id + "}:messages")).isFalse();
+        }
+        redis.delete("suts:agent:memory:v2:{" + id + "}:lock");
+    }
     private static final String PASSWORD = "agent-integration-only";
     private static final int REDIS_PORT = freePort();
     private static final Process REDIS = startRedis();

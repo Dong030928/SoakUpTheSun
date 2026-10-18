@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
-public class RedisConversationMemoryRepository {
+public class RedisConversationMemoryRepository implements ConversationMemoryStore {
     private static final Pattern CONVERSATION_ID = Pattern.compile("user:[0-9]+:[a-f0-9]{64}");
     private static final String PREFIX = "suts:agent:memory:v2:";
     private static final int MAX_MESSAGES = 1000;
@@ -45,6 +45,7 @@ public class RedisConversationMemoryRepository {
     private static final DefaultRedisScript<Long> RELEASE = script("memory_release.lua");
     private static final DefaultRedisScript<Long> SAVE = script("memory_save.lua");
     private static final DefaultRedisScript<Long> DELETE = script("memory_delete.lua");
+    private static final DefaultRedisScript<Long> RESTORE = script("memory_restore.lua");
 
     private final StringRedisTemplate redis;
     private final long leaseMs;
@@ -100,7 +101,7 @@ public class RedisConversationMemoryRepository {
         scheduler.shutdownNow();
     }
 
-    public final class Lease implements AutoCloseable {
+    public final class Lease implements ConversationMemoryStore.Session {
         private final String conversationId;
         private final String token;
         private final AtomicBoolean valid = new AtomicBoolean(true);
@@ -115,6 +116,21 @@ public class RedisConversationMemoryRepository {
 
         public ChatMemoryRepository repository() {
             return repository;
+        }
+
+        public boolean hasStoredSnapshot() {
+            assertValid();
+            // Corruption is not absence: recovery must not silently overwrite an unreadable record.
+            return !Boolean.FALSE.equals(redis.hasKey(key(conversationId, "messages")));
+        }
+
+        /** Offline recovery only: never replace an existing (even corrupt) hot snapshot. */
+        public boolean restoreIfMissing(List<Message> messages) {
+            assertValid();
+            Long result = redis.execute(RESTORE, List.of(key(conversationId, "lock"),
+                    key(conversationId, "messages")), token, encode(messages, conversationId), Long.toString(ttlMs));
+            if (result == null || result < 0) throw new MemoryLeaseLostException();
+            return result == 1;
         }
 
         public void assertValid() {
