@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.hgc.suts.gateway.common.errorcode.BaseErrorCode;
 import org.hgc.suts.gateway.common.exception.AbstractException;
 import org.hgc.suts.gateway.common.result.Result;
+import org.hgc.suts.gateway.memory.ConversationBusyException;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -23,6 +24,11 @@ import java.util.Optional;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(ConversationBusyException.class)
+    public Result conversationBusy(ConversationBusyException ex) {
+        return Results.failure("409", "该会话正在处理中，请稍后重试");
+    }
 
     /**
      * 拦截参数验证异常
@@ -68,9 +74,6 @@ public class GlobalExceptionHandler {
     }
 
     private String getUrl(HttpServletRequest request) {
-        if (StrUtil.isEmpty(request.getQueryString())) {
-            return request.getRequestURL().toString();
-        }
-        return request.getRequestURL().toString() + "?" + request.getQueryString();
+        return request.getRequestURL().toString();
     }
 }

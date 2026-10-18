@@ -1,6 +1,7 @@
 package org.hgc.suts.gateway.config;
 
 import com.alibaba.ttl.threadpool.TtlExecutors;
+import org.hgc.suts.gateway.common.biz.user.UserContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -37,5 +38,22 @@ public class ThreadPoolConfig {
     public Executor aiTaskExecutor(@Qualifier("aiWorkerPool") ThreadPoolTaskExecutor executor) {
         // Preserve authentication propagation without hiding the pool's lifecycle from Spring.
         return TtlExecutors.getTtlExecutor(executor);
+    }
+
+    @Bean("memoryTaskExecutor")
+    public ThreadPoolTaskExecutor memoryTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("suts-memory-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.setTaskDecorator(task -> () -> {
+            UserContext.remove();
+            try { task.run(); }
+            finally { UserContext.remove(); }
+        });
+        // Tasks carry explicit user IDs and text, never a copied login/token ThreadLocal.
+        return executor;
     }
 }

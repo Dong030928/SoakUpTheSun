@@ -16,6 +16,37 @@ permissions:
   contents: read
 
 jobs:
+  verify-vector-memory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: agent/pom.xml
+      - name: Start isolated Redis Query Engine and JSON
+        run: |
+          docker run -d --rm --name suts-memory-ci -p 127.0.0.1:16379:6379 redis:8.2.1 redis-server --save "" --appendonly no --requirepass agent-vector-integration-only
+          for attempt in {1..30}; do
+            if docker exec suts-memory-ci redis-cli --no-auth-warning -a agent-vector-integration-only PING; then break; fi
+            sleep 1
+          done
+          docker exec suts-memory-ci redis-cli --no-auth-warning -a agent-vector-integration-only SET suts:agent:test:redis-vector-fixture agent-vector-integration-only
+      - name: Verify real vector store and data migration
+        run: mvn -B -ntp -f agent/pom.xml verify -Predis-vector -Dredis.vector.port=16379
+      - name: Stop isolated Redis
+        if: always()
+        run: docker stop suts-memory-ci || true
+      - name: Upload vector test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-vector-memory-java-17
+          path: |
+            agent/target/surefire-reports/
+            agent/target/failsafe-reports/
   verify-picture:
     runs-on: ubuntu-latest
     steps:

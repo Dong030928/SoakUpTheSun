@@ -1,100 +1,121 @@
 package org.hgc.suts.gateway.service.impl;
 
-import cn.hutool.core.util.IdUtil;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.hgc.suts.gateway.common.constant.RedisCacheConstant;
+import org.hgc.suts.gateway.config.AiConfig;
+import org.hgc.suts.gateway.config.MemoryVectorProperties;
+import org.hgc.suts.gateway.manager.ManagedMemoryVectorStore;
 import org.hgc.suts.gateway.service.VectorStorageService;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.stereotype.Service;
-import redis.clients.jedis.JedisPooled;
-import redis.clients.jedis.search.Document;
-import redis.clients.jedis.search.Query;
-import redis.clients.jedis.search.SearchResult;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import redis.clients.jedis.RedisClient;
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
-/**
- * 向量存储服务 (Jedis 实现版)
- * 简洁、稳定、原生支持 RediSearch
- */
-@Slf4j
+/** Ownership is a mandatory server-side filter, never a caller-supplied expression. */
 @Service
-@RequiredArgsConstructor
 public class RedisVectorStorageServiceImpl implements VectorStorageService {
+    private final ManagedMemoryVectorStore managedStore;
+    private final MemoryVectorProperties properties;
+    private final AiConfig ai;
+    private final RedisClient redis;
 
-    private final JedisPooled jedis;
-
-    @Override
-    public void saveMemory(Long userId, String content, List<Double> vector) {
-        String key = RedisCacheConstant.VECTOR_DATA_KEY_PREFIX + userId + ":" + IdUtil.fastSimpleUUID();
-
-        // 1. 转换向量
-        byte[] vectorBytes = toByteArray(vector);
-
-        // 2. 准备数据 Map
-        Map<String, Object> fields = new HashMap<>();
-        fields.put("userId", String.valueOf(userId));
-        fields.put("content", content);
-        // Jedis 会自动处理 byte[]
-        fields.put("vector", vectorBytes);
-
-        // 3. 存入 Redis Hash
-        Map<byte[], byte[]> byteFields = new HashMap<>();
-        byteFields.put("userId".getBytes(), String.valueOf(userId).getBytes());
-        byteFields.put("content".getBytes(), content.getBytes());
-        byteFields.put("vector".getBytes(), vectorBytes);
-
-        jedis.hset(key.getBytes(), byteFields);
-
-        log.debug("已保存记忆: {}", key);
+    public RedisVectorStorageServiceImpl(ManagedMemoryVectorStore managedStore, MemoryVectorProperties properties,
+                                        AiConfig ai, RedisClient redis) {
+        this.managedStore = managedStore;
+        this.properties = properties;
+        this.ai = ai;
+        this.redis = redis;
     }
 
     @Override
-    public List<String> searchMemory(Long userId, List<Double> queryVector, int limit) {
-        try {
-            // 1. 转换查询向量
-            byte[] vectorBytes = toByteArray(queryVector);
+    public void saveMemory(Long userId, String content) {
+        if (!properties.isEnabled() || !ai.isEmbeddingEnabled() || !properties.isWritesEnabled()) return;
+        write(userId, content, UUID.randomUUID().toString(), null);
+    }
 
-            // 2. 构建查询语句,例 @userId:{1001}=>[KNN 3 @vector $blob AS score]
-            String queryStr = String.format("@userId:{%d}=>[KNN %d @vector $blob AS score]", userId, limit);
+    /** Only the opt-in migration command can import while normal application writes are frozen. */
+    public void importMemory(Long userId, String content, String deterministicId, String legacyKey) {
+        Assert.state(!properties.isWritesEnabled(), "Freeze vector writes before importing legacy memories");
+        Assert.hasText(legacyKey, "Legacy source key is required");
+        write(userId, content, deterministicId, legacyKey);
+    }
 
-            Query query = new Query(queryStr)
-                    // 传入二进制参数
-                    .addParam("blob", vectorBytes)
-                    // 只返回这些字段
-                    .returnFields("content", "score")
-                    // 按相似度排序
-                    .setSortBy("score", true)
-                    .dialect(2);
+    public boolean containsDocument(String id) {
+        validateId(id);
+        return redis.exists(properties.effectivePrefix(ai) + id);
+    }
 
-            // 3. 执行搜索
-            SearchResult result = jedis.ftSearch(RedisCacheConstant.VECTOR_INDEX_NAME, query);
+    private void write(Long userId, String content, String id, String legacyKey) {
+        validateOwner(userId);
+        validateId(id);
+        Assert.hasText(content, "Memory content must not be empty");
+        Assert.isTrue(content.length() <= properties.getMaxDocumentChars(), "Memory content exceeds its character budget");
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("userId", userId.toString());
+        metadata.put("schemaVersion", MemoryVectorProperties.SCHEMA_VERSION);
+        metadata.put("embeddingModel", ai.getEmbeddingModelName());
+        metadata.put("embeddingModelTag", properties.embeddingModelTag(ai));
+        metadata.put("embeddingDimension", ai.getVector().getDimension());
+        metadata.put("createdAt", System.currentTimeMillis());
+        if (legacyKey != null) metadata.put("legacyKey", legacyKey);
+        managedStore.getStore().add(List.of(Document.builder().id(id).text(content).metadata(metadata).build()));
+    }
 
-            // 4. 解析结果
-            List<String> memories = new ArrayList<>();
-            for (Document doc : result.getDocuments()) {
-                String content = doc.getString("content");
-                if (content != null) {
-                    memories.add(content);
-                }
-            }
-            return memories;
-
-        } catch (Exception e) {
-            log.error("向量检索失败", e);
-            return Collections.emptyList();
+    @Override
+    public List<String> searchMemory(Long userId, String query, int limit) {
+        validateOwner(userId);
+        Assert.hasText(query, "Memory query must not be empty");
+        Assert.isTrue(query.length() <= properties.getMaxDocumentChars(), "Memory query exceeds its character budget");
+        Assert.isTrue(limit > 0, "Memory result limit must be positive");
+        if (!properties.isEnabled() || !ai.isEmbeddingEnabled()) return List.of();
+        var b = new FilterExpressionBuilder();
+        var filter = b.and(b.eq("userId", userId.toString()),
+                b.and(b.eq("schemaVersion", MemoryVectorProperties.SCHEMA_VERSION),
+                        b.and(b.eq("embeddingModelTag", properties.embeddingModelTag(ai)),
+                                b.eq("embeddingDimension", ai.getVector().getDimension())))).build();
+        var request = SearchRequest.builder().query(query).topK(Math.min(limit, properties.getTopK()))
+                .similarityThreshold(properties.getSimilarityThreshold()).filterExpression(filter).build();
+        List<Document> documents = managedStore.getStore().similaritySearch(request);
+        var result = new ArrayList<String>();
+        var seen = new HashSet<String>();
+        int remaining = properties.getMaxRecallChars();
+        if (documents == null) return List.of();
+        for (Document document : documents) {
+            if (document == null || !matchesOwnerAndSchema(document, userId)
+                    || document.getScore() == null || !Double.isFinite(document.getScore())
+                    || document.getScore() < properties.getSimilarityThreshold()
+                    || !StringUtils.hasText(document.getText()) || !seen.add(document.getText())) continue;
+            String text = document.getText();
+            if (text.length() > remaining) text = text.substring(0, remaining);
+            result.add(text);
+            remaining -= text.length();
+            if (remaining == 0 || result.size() >= request.getTopK()) break;
         }
+        return List.copyOf(result);
     }
 
-    private byte[] toByteArray(List<Double> doubles) {
-        ByteBuffer buffer = ByteBuffer.allocate(doubles.size() * 4).order(ByteOrder.LITTLE_ENDIAN);
-        for (Double d : doubles) buffer.putFloat(d.floatValue());
-        return buffer.array();
+    private boolean matchesOwnerAndSchema(Document document, Long userId) {
+        Map<String, Object> metadata = document.getMetadata();
+        return userId.toString().equals(String.valueOf(metadata.get("userId")))
+                && MemoryVectorProperties.SCHEMA_VERSION.equals(String.valueOf(metadata.get("schemaVersion")))
+                && ai.getEmbeddingModelName().equals(String.valueOf(metadata.get("embeddingModel")))
+                && properties.embeddingModelTag(ai).equals(String.valueOf(metadata.get("embeddingModelTag")))
+                && String.valueOf(ai.getVector().getDimension()).equals(String.valueOf(metadata.get("embeddingDimension")));
+    }
+
+    private static void validateOwner(Long userId) {
+        Assert.isTrue(userId != null && userId > 0, "Authenticated memory owner is required");
+    }
+
+    private static void validateId(String id) {
+        Assert.isTrue(id != null && id.matches("[A-Za-z0-9_-]{1,128}"), "Memory document ID is invalid");
     }
 }
