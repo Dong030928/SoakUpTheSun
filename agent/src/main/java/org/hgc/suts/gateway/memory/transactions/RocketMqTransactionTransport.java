@@ -21,7 +21,7 @@ import java.util.function.Supplier;
 
 /** Classic remoting transaction protocol, verified with client/Broker 5.4.0 on Java 17 and 21. */
 @Slf4j
-public final class RocketMqTransactionTransport implements TransactionTransport {
+public final class RocketMqTransactionTransport implements TransactionTransport, org.hgc.suts.gateway.memory.summary.SummaryMessaging {
     public static final String TAG = "conversation-turn-v1";
     private final TransactionMQProducer producer;
     private final DefaultMQPushConsumer consumer;
@@ -29,11 +29,18 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
     private final RedisTransactionLedger ledger;
     private final TransactionMetrics metrics;
     private final ThreadPoolExecutor checks;
+    private final org.hgc.suts.gateway.memory.summary.SummaryMessaging.Handler summaries;
     private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
 
     public RocketMqTransactionTransport(MemoryTransactionProperties config, RedisTransactionLedger ledger,
             ArchiveMessageConsumer listener, TransactionMetrics metrics) {
+        this(config, ledger, listener, metrics, null);
+    }
+    public RocketMqTransactionTransport(MemoryTransactionProperties config, RedisTransactionLedger ledger,
+            ArchiveMessageConsumer listener, TransactionMetrics metrics,
+            org.hgc.suts.gateway.memory.summary.SummaryMessaging.Handler summaries) {
         this.config = config; this.ledger = ledger; this.metrics = metrics;
+        this.summaries = summaries;
         String instance = "agent-memory-" + UUID.randomUUID();
         producer = new TransactionMQProducer(config.getProducerGroup());
         producer.setNamesrvAddr(config.getNameServer());
@@ -52,8 +59,9 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
         producer.setTransactionListener(new TransactionListener() {
             @Override public LocalTransactionState executeLocalTransaction(Message message, Object argument) {
                 try {
-                    ArchiveEvent event = decode(message);
-                    if (!(argument instanceof LocalWork work) || !work.event.equals(event)) return LocalTransactionState.UNKNOW;
+                    validateMessage(message);
+                    if (!(argument instanceof LocalWork work) || !work.tag.equals(message.getTags())
+                            || !java.util.Arrays.equals(work.body, message.getBody())) return LocalTransactionState.UNKNOW;
                     return wire(work.callback.get());
                 } catch (RuntimeException ex) {
                     metrics.unknown.increment();
@@ -62,7 +70,11 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
             }
             @Override public LocalTransactionState checkLocalTransaction(MessageExt message) {
                 metrics.checks.increment();
-                try { return wire(ledger.check(decode(message))); }
+                try {
+                    if (summaries != null && org.hgc.suts.gateway.memory.summary.SummaryMessaging.TAG.equals(message.getTags()))
+                        return wire(summaries.check(message.getBody()));
+                    return wire(ledger.check(decode(message)));
+                }
                 catch (RuntimeException ex) { metrics.unknown.increment(); return LocalTransactionState.UNKNOW; }
             }
         });
@@ -79,7 +91,11 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
         consumer.setAwaitTerminationMillisWhenShutdown(5000);
         consumer.registerMessageListener((MessageListenerConcurrently) (messages, context) -> {
             try {
-                for (MessageExt message : messages) listener.consume(message.getBody(), message.getReconsumeTimes());
+                for (MessageExt message : messages) {
+                    if (summaries != null && org.hgc.suts.gateway.memory.summary.SummaryMessaging.TAG.equals(message.getTags()))
+                        summaries.consume(message.getBody());
+                    else listener.consume(message.getBody(), message.getReconsumeTimes());
+                }
                 return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
             } catch (RuntimeException ex) { return ConsumeConcurrentlyStatus.RECONSUME_LATER; }
         });
@@ -107,7 +123,8 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
     }
 
     void startConsumer() throws Exception {
-        consumer.subscribe(config.getTopic(), TAG);
+        consumer.subscribe(config.getTopic(), summaries == null ? TAG : TAG + " || "
+                + org.hgc.suts.gateway.memory.summary.SummaryMessaging.TAG);
         consumer.start();
     }
 
@@ -130,8 +147,16 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
 
     @Override public State send(ArchiveEvent event, Supplier<State> localTransaction) {
         Message message = new Message(config.getTopic(), TAG, event.turn().eventId(), event.encode(config.getMaxMessageBytes()));
+        return send(message, localTransaction);
+    }
+    @Override public State sendSummary(org.hgc.suts.gateway.memory.summary.SummaryEvent event, Supplier<State> localTransaction) {
+        org.springframework.util.Assert.notNull(summaries, "Summary transaction handler is disabled");
+        return send(new Message(config.getTopic(), org.hgc.suts.gateway.memory.summary.SummaryMessaging.TAG,
+                event.jobId(), event.encode(config.getMaxMessageBytes())), localTransaction);
+    }
+    private State send(Message message, Supplier<State> localTransaction) {
         try {
-            var result = producer.sendMessageInTransaction(message, new LocalWork(event, localTransaction));
+            var result = producer.sendMessageInTransaction(message, new LocalWork(message.getBody(), message.getTags(), localTransaction));
             if (result.getSendStatus() != SendStatus.SEND_OK) return State.UNKNOWN;
             return state(result.getLocalTransactionState());
         } catch (Exception ex) {
@@ -140,6 +165,11 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
     }
     private ArchiveEvent decode(Message message) {
         return ArchiveEvent.decode(message.getBody(), config.getMaxMessageBytes(), config.getGeneration());
+    }
+    private void validateMessage(Message message) {
+        if (summaries != null && org.hgc.suts.gateway.memory.summary.SummaryMessaging.TAG.equals(message.getTags()))
+            summaries.validate(message.getBody());
+        else decode(message);
     }
     private static LocalTransactionState wire(State state) {
         return switch (state) {
@@ -158,5 +188,5 @@ public final class RocketMqTransactionTransport implements TransactionTransport 
     @Override public void close() {
         if (closed.compareAndSet(false, true)) { consumer.shutdown(); producer.shutdown(); checks.shutdownNow(); }
     }
-    private record LocalWork(ArchiveEvent event, Supplier<State> callback) { }
+    private record LocalWork(byte[] body, String tag, Supplier<State> callback) { }
 }

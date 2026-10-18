@@ -47,6 +47,10 @@ public class ChatMemoryManager {
     }
 
     public void saveHistory(Long userId, String userInput, String answer) {
+        saveHistory(userId, userInput, answer, null);
+    }
+    public void saveHistory(Long userId, String userInput, String answer,
+                            org.hgc.suts.gateway.memory.summary.SummaryContext.Source source) {
         if (!properties.isWritesEnabled()) return;
         String question = bounded(userInput);
         int limit = vectorProperties.getMaxDocumentChars();
@@ -57,7 +61,10 @@ public class ChatMemoryManager {
         String content = prefix + reply.substring(0, Math.min(reply.length(), limit - prefix.length()));
         try {
             writer.execute(() -> {
-                try { vectors.saveMemory(userId, content); }
+                try {
+                    if (source == null) vectors.saveMemory(userId, content);
+                    else vectors.saveTurn(userId, content, source);
+                }
                 catch (Exception ex) { log.warn("长期记忆保存不可用，跳过本轮写入 ({})", ex.getClass().getSimpleName()); }
             });
         } catch (RejectedExecutionException ex) {

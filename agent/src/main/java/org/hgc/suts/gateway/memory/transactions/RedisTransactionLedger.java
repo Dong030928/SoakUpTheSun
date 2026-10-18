@@ -103,17 +103,26 @@ public final class RedisTransactionLedger implements AutoCloseable {
     }
 
     public State commit(ArchiveEvent event, String leaseToken, long expectedHead, String snapshot, long hotTtlMs) {
+        return commit(event, leaseToken, expectedHead, snapshot, hotTtlMs, null, null);
+    }
+
+    /** M03 appends the full uncovered turn in the SAME local transaction as M02 acceptance evidence. */
+    public State commit(ArchiveEvent event, String leaseToken, long expectedHead, String snapshot, long hotTtlMs,
+                        String expectedSummary, String nextSummary) {
         try {
             requireGeneration();
             var turn = event.turn();
             String body = new String(event.encode(config.getMaxMessageBytes()), StandardCharsets.UTF_8);
-            Long result = redis.execute(COMMIT, List.of(key(turn.conversationId(), "lock"),
-                            key(turn.conversationId(), "transactions"), key(turn.conversationId(), "messages")),
+            var keys = new java.util.ArrayList<>(List.of(key(turn.conversationId(), "lock"),
+                    key(turn.conversationId(), "transactions"), key(turn.conversationId(), "messages")));
+            if (nextSummary != null) keys.add(key(turn.conversationId(), "summary"));
+            Long result = redis.execute(COMMIT, keys,
                     leaseToken, config.getGeneration(), Long.toString(turn.epoch()), Long.toString(expectedHead),
                     turn.eventId(), event.payloadHash(), body, snapshot, Long.toString(hotTtlMs),
                     Long.toString(System.currentTimeMillis()), Integer.toString(config.getMaxPendingPerConversation()),
                     Integer.toString(config.getMaxEvidencePerConversation()), Integer.toString(config.getMaxLedgerBytes()),
-                    Long.toString(config.getEvidenceRetentionSeconds() * 1000), turn.conversationId());
+                    Long.toString(config.getEvidenceRetentionSeconds() * 1000), turn.conversationId(),
+                    expectedSummary == null ? "" : expectedSummary, nextSummary == null ? "" : nextSummary);
             if (Long.valueOf(1).equals(result)) { metrics.committed.increment(); return State.COMMITTED; }
             if (Long.valueOf(-1).equals(result)) { metrics.aborted.increment(); return State.ABORTED; }
         } catch (RuntimeException ex) {

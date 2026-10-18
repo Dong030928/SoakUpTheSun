@@ -5,14 +5,14 @@ compose=(docker compose -f "$fixture_dir/compose.yaml")
 "${compose[@]}" up -d --wait mysql redis nameserver broker
 "${compose[@]}" exec -T redis redis-cli --no-auth-warning -a agent-transactions-integration-only \
   SETNX suts:agent:memory:transactions:generation agent-transactions-integration-only
-for attempt in {1..30}; do
-  result="$("${compose[@]}" exec -T broker sh mqadmin updateTopic -b 127.0.0.1:10931 \
-    -t SutsMemoryArchiveIT -r 2 -w 2 -a '+message.type=TRANSACTION' 2>&1)"
-  if [[ "$result" == *"create topic to 127.0.0.1:10931 success."* ]]; then
-    printf '%s\n' 'Isolated MySQL/Redis/RocketMQ transaction fixture is ready.'
-    exit 0
-  fi
-  sleep 1
+for topic in SutsMemoryArchiveIT SutsMemorySummaryIT; do
+  ready=false
+  for attempt in {1..30}; do
+    result="$("${compose[@]}" exec -T broker sh mqadmin updateTopic -b 127.0.0.1:10931 \
+      -t "$topic" -r 2 -w 2 -a '+message.type=TRANSACTION' 2>&1)"
+    if [[ "$result" == *"create topic to 127.0.0.1:10931 success."* ]]; then ready=true; break; fi
+    sleep 1
+  done
+  if [[ "$ready" != true ]]; then printf '%s\n' "$result" >&2; exit 1; fi
 done
-printf '%s\n' "$result" >&2
-exit 1
+printf '%s\n' 'Isolated MySQL/Redis/RocketMQ transaction fixture is ready.'

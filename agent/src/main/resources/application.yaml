@@ -73,6 +73,10 @@ suts:
         generation: ${AI_MEMORY_REDIS_GENERATION:}
         evidence-retention-seconds: ${AI_MEMORY_EVIDENCE_RETENTION_SECONDS:0}
         recovery-window-seconds: ${AI_MEMORY_RECOVERY_WINDOW_SECONDS:0}
+      # Opt-in M03: explicit model budgets/watermarks are required. No fabricated provider TTL defaults.
+      summary:
+        enabled: ${AI_MEMORY_SUMMARY_ENABLED:false}
+        accepting: ${AI_MEMORY_SUMMARY_ACCEPTING:true}
       vector:
         enabled: ${AI_MEMORY_VECTOR_ENABLED:true}
         writes-enabled: ${AI_MEMORY_VECTOR_WRITES_ENABLED:true}

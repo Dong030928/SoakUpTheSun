@@ -37,13 +37,16 @@ public class MemoryTransactionConfiguration {
         return new ArchiveMessageConsumer(archive, ledger, properties, metrics);
     }
     @Bean(initMethod = "start", destroyMethod = "close") public RocketMqTransactionTransport transactionTransport(
-            MemoryTransactionProperties properties, RedisTransactionLedger ledger, ArchiveMessageConsumer listener, TransactionMetrics metrics) {
-        return new RocketMqTransactionTransport(properties, ledger, listener, metrics);
+            MemoryTransactionProperties properties, RedisTransactionLedger ledger, ArchiveMessageConsumer listener, TransactionMetrics metrics,
+            org.springframework.beans.factory.ObjectProvider<org.hgc.suts.gateway.memory.summary.SummaryMessaging.Handler> summaries) {
+        return new RocketMqTransactionTransport(properties, ledger, listener, metrics, summaries.getIfAvailable());
     }
     @Bean @Primary public ConversationMemoryStore transactionalConversationMemoryStore(RedisConversationMemoryRepository redis,
             RedisTransactionLedger ledger, JdbcConversationArchive archive, TransactionTransport transport,
-            MemoryTransactionProperties properties, @Value("${suts.ai.memory.ttl-seconds:86400}") long ttlSeconds) {
-        return new TransactionalConversationMemoryStore(redis, ledger, archive, transport, properties, Math.multiplyExact(ttlSeconds, 1000));
+            MemoryTransactionProperties properties, @Value("${suts.ai.memory.ttl-seconds:86400}") long ttlSeconds,
+            org.springframework.beans.factory.ObjectProvider<org.hgc.suts.gateway.memory.summary.SummaryCoordinator> summaries) {
+        return new TransactionalConversationMemoryStore(redis, ledger, archive, transport, properties,
+                Math.multiplyExact(ttlSeconds, 1000), summaries.getIfAvailable());
     }
     @Bean(initMethod = "start", destroyMethod = "close") public ArchiveReconciler archiveReconciler(RedisTransactionLedger ledger,
             JdbcConversationArchive archive, TransactionTransport transport, MemoryTransactionProperties properties, TransactionMetrics metrics) {

@@ -123,6 +123,7 @@ public class RedisConversationMemoryRepository implements ConversationMemoryStor
 
         @Override public void prepare() {
             assertValid();
+            assertNoSummaryState();
             if (!Boolean.FALSE.equals(redis.hasKey(key(conversationId, "transactions")))) {
                 throw new org.hgc.suts.gateway.memory.transactions.MemoryTransactionsUnavailableException();
             }
@@ -130,8 +131,15 @@ public class RedisConversationMemoryRepository implements ConversationMemoryStor
 
         public void assertNoTransactionEvidence() {
             assertValid();
+            assertNoSummaryState();
             Assert.state(Boolean.FALSE.equals(redis.hasKey(key(conversationId, "transactions"))),
                     "Transaction evidence exists: use verified transaction maintenance after draining MQ");
+        }
+        public void assertNoSummaryState() {
+            assertValid();
+            Assert.state(Boolean.FALSE.equals(redis.hasKey(key(conversationId, "summary")))
+                            && Boolean.FALSE.equals(redis.hasKey(key(conversationId, "summary-proof"))),
+                    "Summary state exists: drain and explicitly migrate it before using an older writer/maintenance command");
         }
 
         public boolean hasStoredSnapshot() {

@@ -38,7 +38,8 @@ public class AiModelConfiguration {
         factory.setReadTimeout(timeout);
         DeepSeekApi api = DeepSeekApi.builder().baseUrl(config.getApiHost()).apiKey(config.getApiKey())
                 .completionsPath("/chat/completions")
-                .restClientBuilder(RestClient.builder().requestFactory(factory)).build();
+                .restClientBuilder(RestClient.builder().requestFactory(factory)
+                        .requestInterceptor(new DeepSeekCacheUsageInterceptor())).build();
         return DeepSeekChatModel.builder().deepSeekApi(api)
                 .options(DeepSeekChatOptions.builder().model(config.getModelName()).disableThinking()
                         .temperature(config.getTemperature()).build())
@@ -46,13 +47,23 @@ public class AiModelConfiguration {
     }
 
     @Bean
-    public ChatClient agentChatClient(ChatModel agentChatModel) {
+    public ChatClient agentChatClient(ChatModel agentChatModel,
+            org.springframework.beans.factory.ObjectProvider<org.hgc.suts.gateway.memory.summary.SummaryBudgetAdvisor> summaryBudget) {
+        return buildChatClient(agentChatModel, summaryBudget.getIfAvailable());
+    }
+    private ChatClient buildChatClient(ChatModel agentChatModel, org.hgc.suts.gateway.memory.summary.SummaryBudgetAdvisor summaryBudget) {
         var tools = ToolCallingManager.builder().maxCallsPerTool(2).maxTotalToolCalls(2)
                 .resolutionFallbackEnabled(false)
                 .toolExecutionExceptionProcessor(ex -> "工具参数无效或执行被拒绝，请检查参数，勿假定执行成功。")
                 .build();
-        return ChatClient.builder(agentChatModel)
-                .defaultAdvisors(ToolCallingAdvisor.builder().toolCallingManager(tools).build()).build();
+        var builder = ChatClient.builder(agentChatModel).defaultAdvisors(ToolCallingAdvisor.builder().toolCallingManager(tools).build());
+        if (summaryBudget != null) builder.defaultAdvisors(summaryBudget);
+        return builder.build();
+    }
+
+    /** Convenience for standalone callers/tests with summary disabled. */
+    public ChatClient agentChatClient(ChatModel agentChatModel) {
+        return buildChatClient(agentChatModel, null);
     }
 
     @Bean
