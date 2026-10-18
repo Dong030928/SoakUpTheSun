@@ -24,7 +24,7 @@ import java.util.List;
 @Component
 @RequiredArgsConstructor
 public class ConversationMemory {
-    private final RedisConversationMemoryRepository repository;
+    private final ConversationMemoryStore repository;
     private final MemoryProperties properties;
 
     public Turn open(Long userId, String session, String input) {
@@ -46,10 +46,10 @@ public class ConversationMemory {
     public final class Turn implements AutoCloseable {
         private final String id;
         private final String input;
-        private final RedisConversationMemoryRepository.Lease lease;
+        private final ConversationMemoryStore.Session lease;
         private final List<Message> previous;
 
-        private Turn(String id, String input, RedisConversationMemoryRepository.Lease lease) {
+        private Turn(String id, String input, ConversationMemoryStore.Session lease) {
             this.id = id;
             this.input = input;
             this.lease = lease;

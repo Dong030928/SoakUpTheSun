@@ -70,6 +70,28 @@
             <artifactId>spring-ai-redis-store</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-model-chat-memory-repository-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
@@ -163,6 +185,15 @@
 
     <profiles>
         <profile>
+            <id>mysql-archive</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration><includes combine.children="append"><include>**/MysqlArchiveIT.java</include></includes></configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>local-redis</id>
             <build>
                 <plugins>
@@ -170,7 +201,7 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-failsafe-plugin</artifactId>
                         <configuration>
-                            <includes><include>**/LocalRedisIT.java</include></includes>
+                            <includes combine.children="append"><include>**/LocalRedisIT.java</include></includes>
                         </configuration>
                         <executions>
                             <execution>
@@ -192,7 +223,7 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-failsafe-plugin</artifactId>
                         <configuration>
-                            <includes><include>**/RedisVectorIT.java</include></includes>
+                            <includes combine.children="append"><include>**/RedisVectorIT.java</include></includes>
                         </configuration>
                         <executions>
                             <execution>

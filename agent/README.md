@@ -20,6 +20,8 @@ Redis 登录、视觉与短期会话使用 Spring Data Redis/Lettuce；长期记
 
 已有长期记忆的部署应先阅读 `MEMORY-MIGRATION.md`：新版本使用独立 v2 JSON 索引，不自动读取或覆盖旧 HASH 向量。只切应用而不迁移，会暂时无法召回旧长期记忆。
 
+M01 增加可选 JDBC 归档与离线恢复基础，见 [ARCHIVE-M01.md](ARCHIVE-M01.md)。默认关闭，不要求 MySQL；启用后提供内部归档服务和受控维护命令。当前聊天仍提交 Redis，正式事务消息异步落库由 M02 接入，TTL 双水位及摘要向量检索由 M03 实现。
+
 PR-01 中，Agent 没有数据库 Mapper、SQL 操作或具体 MQ 生产者，因此移除了 MyBatis-Plus、MySQL、RocketMQ 及未被调用的 MQ 抽象模板；用 Spring Data Redis 替代只为 StringRedisTemplate 引入的 Redisson。该次升级仅涉及 Agent；PR-02 另修复 Picture 的视觉上下文链路。
 
 Knife4j 替换为支持 Boot 4 的 springdoc，`/doc.html` 仍可访问，跳转至 `/swagger-ui/index.html`；OpenAPI 为 `/v3/api-docs`。原 AI 线程池参数与 TTL 透传保持不变，底层线程池改由 Spring 初始化和关闭。

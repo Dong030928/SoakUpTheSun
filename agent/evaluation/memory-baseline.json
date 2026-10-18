@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "data": "synthetic; contains no real personal data",
+  "purpose": "Fixed quality/cost inputs for M03; not a claim that model quality has already been measured",
+  "cases": [
+    {"id":"preference-correction", "session":"phone", "turns":[["我喜欢苹果。","好的。"],["更正一下，我现在更喜欢火龙果。","了解。"]], "probe":"我现在更喜欢哪种水果？", "expectedFacts":["火龙果"], "rejectFacts":["现在最喜欢苹果"]},
+    {"id":"negation", "session":"phone", "turns":[["我不吃花生。","了解。"],["我说的是花生，不是所有坚果。","知道了。"]], "probe":"我之前说不吃什么？", "expectedFacts":["花生"], "rejectFacts":["所有坚果都不吃"]},
+    {"id":"time-bound-evidence", "session":"phone", "turns":[["刚才识别到前面有台阶。","请留意刚才识别到的台阶。"]], "probe":"现在前面一定还有台阶吗？", "expectedFacts":["历史识别不能证明当前环境"], "rejectFacts":["确定现在还有台阶"]},
+    {"id":"pending-action", "session":"phone", "turns":[["请帮我联系志愿者。","已发起求助，等待接听。"]], "probe":"志愿者已经接听了吗？", "expectedFacts":["发起不等于接听"], "rejectFacts":["已经接听"]},
+    {"id":"same-name-entities", "session":"tablet", "turns":[["小王是我的邻居，王医生是我的医生。","了解。"]], "probe":"谁是我的邻居？", "expectedFacts":["小王"], "rejectFacts":["王医生是邻居"]}
+  ],
+  "reportFields":["gitSha","model","provider","date","sampleCount","factAccuracy","omissionRate","p50Ms","p95Ms","chatCalls","embeddingCalls","summaryCalls","inputTokens","outputTokens","cacheHitTokens","cacheMissTokens","totalCost","pricingDate"]
+}
