@@ -12,6 +12,8 @@ import org.hgc.suts.gateway.memory.archive.JdbcConversationArchive;
 import org.hgc.suts.gateway.memory.transactions.*;
 import org.hgc.suts.gateway.remote.VolunteerRemoteService;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -22,7 +24,6 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 import java.net.URI;
 import java.net.http.*;
@@ -31,7 +32,6 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
-import static org.mockito.ArgumentMatchers.*;
 
 /** Real Boot/Tomcat/auth/Spring AI HTTP/tools/Redis/MQ/MySQL. Only model and volunteer endpoints are fixtures. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
@@ -60,7 +60,7 @@ class TransactionApplicationIT {
     @Autowired JdbcConversationArchive archive;
     @Autowired MemoryTransactionProperties properties;
     @Autowired RocketMqTransactionTransport transport;
-    @MockitoSpyBean RedisTransactionLedger ledger;
+    @Autowired RedisTransactionLedger ledger;
     @MockitoBean VolunteerRemoteService volunteer;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
@@ -110,16 +110,49 @@ class TransactionApplicationIT {
             assertThat(MODEL.requests.toString()).doesNotContain(TOKEN, "transaction-model-fixture-only");
         }
     }
-    @Test void failedMemoryCommitPreservesVolunteerActionAndDoesNotReplayIt() throws Exception {
-        doReturn(TransactionTransport.State.UNKNOWN).when(ledger).commit(any(), anyString(), anyLong(), anyString(), anyLong());
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/agent/chat", "/api/agent/chat/async"})
+    void failedMemoryCommitPreservesVolunteerActionAndDoesNotReplayIt(String path) throws Exception {
+        String session = session(), id = ConversationMemory.conversationId(42L, session);
+        String snapshotKey = RedisConversationMemoryRepository.key(id, "messages");
         MODEL.messages.clear(); MODEL.tool("create_volunteer_help", "{}"); MODEL.text("已记住，求助已创建");
-        when(volunteer.createHelpTask()).thenReturn(Results.success(new TargetRoomLinkInfoRespDTO("https://fixture.invalid/room", "fixture-ticket")));
-        var response = chat("/api/agent/chat/async", session(), "请找志愿者");
-        assertThat(response.headers().firstValue("X-Agent-Memory-Status")).contains("degraded");
-        var result = JSONUtil.parseObj(response.body()).getJSONObject("data");
-        assertThat(result.getStr("clientCommand")).isEqualTo("START_VIDEO_CALL");
-        assertThat(result.getStr("text")).contains("记忆未确认保存");
-        assertThat(result.getJSONObject("commandData").getStr("authTicket")).isEqualTo("fixture-ticket");
+        when(volunteer.createHelpTask()).thenAnswer(invocation -> {
+            // Inject after admission/history reads and before commit, scoped to this new conversation.
+            // The real Lua commit must reject a non-string snapshot without writing acceptance evidence.
+            // Do not stub a shared ledger while MQ/reconciliation threads are calling it.
+            redis.opsForHash().put(snapshotKey, "commit-fault", "wrong-type");
+            return Results.success(new TargetRoomLinkInfoRespDTO("https://fixture.invalid/room", "fixture-ticket"));
+        });
+        try {
+            var response = chat(path, session, "请找志愿者");
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.headers().firstValue("X-Agent-Memory-Status")).contains("degraded");
+            var body = JSONUtil.parseObj(response.body());
+            assertThat(body.getStr("code")).isEqualTo("0");
+            var result = body.getJSONObject("data");
+            assertThat(result.getStr("clientCommand")).isEqualTo("START_VIDEO_CALL");
+            assertThat(result.getStr("text")).contains("记忆未确认保存");
+            assertThat(result.getJSONObject("commandData").getStr("authTicket")).isEqualTo("fixture-ticket");
+            assertThat(MODEL.requests.toString()).doesNotContain("fixture-ticket", TOKEN);
+            assertThat(redis.opsForHash().get(snapshotKey, "commit-fault")).isEqualTo("wrong-type");
+            var checkpoint = ledger.read(id);
+            assertThat(checkpoint.head()).isZero();
+            assertThat(checkpoint.events().keySet()).isEmpty();
+            assertThat(archive.snapshot(42, id, 1)).isEmpty();
+        } finally {
+            redis.delete(snapshotKey); // Remove only this test's fault, even if an assertion fails.
+        }
+
+        // The same conversation can commit again after recovery, without replaying the completed help.
+        MODEL.reset("不客气");
+        var recovered = chat(path, session, "谢谢");
+        assertThat(recovered.statusCode()).isEqualTo(200);
+        assertThat(recovered.headers().firstValue("X-Agent-Memory-Status")).contains("accepted");
+        var recoveredBody = JSONUtil.parseObj(recovered.body());
+        assertThat(recoveredBody.getStr("code")).isEqualTo("0");
+        assertThat(recoveredBody.getJSONObject("data").getStr("clientCommand")).isEqualTo("NONE");
+        await(() -> archive.snapshot(42, id, 1).map(s -> s.matchesCheckpoint(1)).orElse(false));
+        assertThat(MODEL.requests.toString()).doesNotContain("请找志愿者");
         verify(volunteer, times(1)).createHelpTask();
         assertThat(MODEL.requests.toString()).doesNotContain("fixture-ticket", TOKEN);
     }
