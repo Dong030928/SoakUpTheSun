@@ -18,11 +18,9 @@ Agent 使用 Spring AI 调用 DeepSeek 对话模型与 OpenAI 兼容的 Embeddin
 
 Redis 登录、视觉与短期会话使用 Spring Data Redis/Lettuce；长期记忆使用 Spring AI RedisVectorStore（RedisClient/Jedis），需要 Redis Query Engine 与 JSON 模块。本次以官方 Redis 8.2.1 容器验证。普通 Redis 可承担短期会话，缺少向量扩展时长期记忆会降级。各服务的登录、视觉缓存须连接同一 Redis 实例和数据库。
 
-已有长期记忆的部署应先阅读 `MEMORY-MIGRATION.md`：新版本使用独立 v2 JSON 索引，不自动读取或覆盖旧 HASH 向量。只切应用而不迁移，会暂时无法召回旧长期记忆。
+已有长期记忆的部署需按本文末尾的“离线迁移与回退”先完成存量数据演练：新版本使用独立 v2 JSON 索引，不自动读取或覆盖旧 HASH 向量。只切应用而不迁移，会暂时无法召回旧长期记忆。
 
-M01 增加可选 JDBC 归档与离线恢复基础，见 [ARCHIVE-M01.md](ARCHIVE-M01.md)。M02 已接通 RocketMQ 事务消息、共享回查证据、MySQL 幂等异步落库、对账重投及受控切换/回退，见 [ARCHIVE-M02.md](ARCHIVE-M02.md)。M03 在其上实现显式 Token 双水位、按厂商规则配置的 TTL、事务投递的异步继承式摘要、持久任务恢复及摘要向量检索，见 [ARCHIVE-M03.md](ARCHIVE-M03.md)。三者默认关闭，原 Redis 模式不需要 MySQL/MQ；启用摘要需先完成 V2 Schema 和事务归档部署，并提供经确认的模型预算及水位，未提供厂商 TTL 时只使用硬上限触发。
-
-PR-01 中，Agent 没有数据库 Mapper、SQL 操作或具体 MQ 生产者，因此移除了 MyBatis-Plus、MySQL、RocketMQ 及未被调用的 MQ 抽象模板；用 Spring Data Redis 替代只为 StringRedisTemplate 引入的 Redisson。该次升级仅涉及 Agent；PR-02 另修复 Picture 的视觉上下文链路。
+可选 JDBC 归档、RocketMQ 事务归档和双水位异步摘要默认关闭，原 Redis 模式不需要 MySQL/MQ。事务模式包含共享回查证据、MySQL 幂等落库及对账重投；摘要在其上提供厂商 TTL 规则、持久任务恢复和摘要向量检索。启用条件见下文“可选归档与摘要”。
 
 Knife4j 替换为支持 Boot 4 的 springdoc，`/doc.html` 仍可访问，跳转至 `/swagger-ui/index.html`；OpenAPI 为 `/v3/api-docs`。原 AI 线程池参数与 TTL 透传保持不变，底层线程池改由 Spring 初始化和关闭。
 
@@ -112,7 +110,23 @@ Advisor 顺序为消息记忆 +200、当前参考内容 +250、工具循环 +300
 
 长期记忆由原生 `RedisVectorStore.add/similaritySearch` 完成 Embedding、JSON 保存和 KNN。每次检索强制认证 userId、Schema、模型及维度过滤，并再次核对返回记录；默认 Top K=3、相似度阈值=0.7，并限制文本预算、去重。模型名另存安全编码标签，兼容 `Qwen/...` 等带斜杠的名称。供应商地址、模型和维度共同确定命名空间，禁止静默混用向量。
 
-记忆写入使用独立的 2–4 线程、100 队列执行器，不复用对话线程池，也不携带登录上下文。队列拒绝或向量服务失败只记录降级，不推翻已完成的业务响应；这意味着长期记忆写入是尽力而为，并非可靠消息队列。迁移、发布切换和回退步骤见 `MEMORY-MIGRATION.md`。
+记忆写入使用独立的 2–4 线程、100 队列执行器，不复用对话线程池，也不携带登录上下文。队列拒绝或向量服务失败只记录降级，不推翻已完成的业务响应；这意味着长期记忆写入是尽力而为，并非可靠消息队列。存量切换需冻结并排空写入，完成备份、离线迁移与增量回退演练。
+
+## 可选归档与摘要
+
+配置通过仓库外 YAML 或环境变量提供，基础映射见 [application.yaml](src/main/resources/application.yaml)，数据库迁移脚本位于 [db/archive](src/main/resources/db/archive)。
+
+| 能力 | 启用要求 |
+| --- | --- |
+| JDBC 归档 | `suts.ai.memory.archive.enabled=true`，提供独立 MySQL Schema、`jdbc-url/username/password`；首次受控部署可设置 `migrate=true`，后续恢复为 false 以校验 Schema |
+| 事务归档 | 同时开启 archive 与 `suts.ai.memory.transactions.enabled`；配置 `name-server/topic/producer-group/consumer-group/generation`，预建事务 Topic，并显式提供 `recovery-window-seconds/evidence-retention-seconds`，证据保留期须覆盖恢复窗口 |
+| 双水位摘要 | 开启 `suts.ai.memory.summary.enabled`，先完成 V2 Schema 和事务归档部署；明确提供 `model-capacity-tokens/output-reserve-tokens/safety-tokens/input-budget-tokens/low-tokens/high-tokens/summary-max-tokens/summary-max-chars` |
+
+事务归档要求独立单节点 Redis，启用 AOF、`appendfsync always`、有界内存与 `noeviction`。首次无流量部署时由运维执行 `SETNX suts:agent:memory:transactions:generation <generation>`，所有实例的配置须一致；generation 丢失后需先对账恢复。生产组须跨实例一致，同一消费组的订阅须一致；启用摘要前暂停流量并排空在途任务，统一部署摘要处理器后再开放准入。
+
+摘要预算须满足 `0 < L < H < B` 与 `B + O + S <= C`，分别对应低/高水位、输入预算、输出预留、安全余量及模型容量；worker 租约须大于模型超时加 15 秒。`cache-policies` 按供应商、模型和缓存模式配置厂商提供的 TTL 及续期/计时规则；不提供厂商依据时仅关闭 TTL 触发，输入硬上限仍生效。
+
+完整字段及校验规则见 [MemoryArchiveProperties](src/main/java/org/hgc/suts/gateway/config/MemoryArchiveProperties.java)、[MemoryTransactionProperties](src/main/java/org/hgc/suts/gateway/config/MemoryTransactionProperties.java) 和 [MemorySummaryProperties](src/main/java/org/hgc/suts/gateway/config/MemorySummaryProperties.java)。关闭准入前可分别设置 `transactions.accepting=false` 或 `summary.accepting=false`，后台消费与恢复仍继续；切换二进制前还须排空任务并核对持久状态，不能通过删除状态绕过门控。
 
 ## 自动验证
 
@@ -165,7 +179,7 @@ mvn -B -ntp -f agent/pom.xml verify -Pmemory-transactions,memory-summary,rag-pro
 docker compose -f agent/src/test/fixtures/memory-transactions/compose.yaml down --volumes
 ```
 
-这些集成测试的模型和 Embedding 是替身。另有显式付费启用的三次真实模型检查，命令和验收边界见 [VALIDATION-M03.md](VALIDATION-M03.md)，不会在普通测试或 CI 读取私有 Key。
+这些集成测试的模型和 Embedding 是替身，普通测试与 CI 不读取私有 Key。真实模型检查由 `live-memory-summary` / `live-profile` profile 单独启用，测试入口见 [LiveSummaryIT](src/test/java/org/hgc/suts/gateway/memory/summary/LiveSummaryIT.java) 和 [LiveProfileIT](src/test/java/org/hgc/suts/gateway/memory/profile/LiveProfileIT.java)。
 
 ## 长期用户画像
 
@@ -236,14 +250,10 @@ Agent 优先读取新 Key，兼容旧 `suts:gateway:vision:context:{userId}` 及
 
 滚动部署先更新 Agent 兼容读端，再更新 Picture 写端。全量更新并排空旧事件、经过原五分钟缓存窗口后，可在后续 PR 删除旧 Key 兼容读取。无需清空共享缓存或重建向量索引。
 
-## 本次验证范围与后续检查
+## 离线迁移与回退
 
-Boot 升级的历史记录见 `VALIDATION.md`，模型和视觉改造记录见 `VALIDATION-PR02.md`，工具编排记录见 `VALIDATION-PR03.md`，本次记忆重构见 `VALIDATION-MEMORY.md`。构建使用 Maven 3.9.11，独立 Redis 为 8.2.1。
+迁移前备份数据，并停止、排空全部实例和后台写入。在不开放 HTTP、不注册 Nacos 的独立进程中运行，配置 `suts.ai.memory.migration.enabled=true`、`writes-frozen=true`、`writers-drained=true`，同时关闭 `memory.writes-enabled` 与 `memory.vector.writes-enabled`。配置项见 [MemoryMigrationProperties](src/main/java/org/hgc/suts/gateway/memory/migration/MemoryMigrationProperties.java)。
 
-已通过仓库外私有配置和实际 JAR 验证真实 DeepSeek `deepseek-flash`、SiliconFlow `Qwen/Qwen3-Embedding-0.6B` 及 Redis 8.2.1 向量检索：连续追问、跨会话长期召回、跨用户隔离、应用重启恢复及异步客户端动作均通过。普通自动化测试继续使用模型替身，不读取真实 Key。
+默认 `dry-run=true`，只检查记录、冲突及预计处理量；核对后才显式设置 false。首次正向迁移从旧 HASH 文本重新 Embedding，需预算调用费用。`checkpoint-name` 标识冻结批次，失败续跑复用原检查点，新批次使用新检查点；核对数量、归属与实际召回后再开放写入。
 
-尚未验证真实 Nacos 服务端注册/注销、原版志愿服务及完整视频联调、真实 COS/RocketMQ/Python 图片识别、生产存量数据迁移。前端指令落地、统一请求取消与异步治理、志愿通知占位等仍属后续工作。
-
-## 回退
-
-先停止并排空新版本写入，在隔离备份中演练 `MEMORY-MIGRATION.md` 的增量回退补齐，再切回旧应用与原模型配置。保留旧索引不等于完整回退：新版本新增的记忆只在 v2 中，必须先补齐；模型或维度变化时，不能把新向量直接写入旧空间。短期 v2 数据和新向量在回退中均不自动删除。
+回退前同样排空写入，备份 v2，并以 `direction=ROLLBACK` 补齐 v2 新增内容，再切回旧应用。仅在新旧 Embedding 地址、模型和维度一致时支持向旧 HASH 空间补齐；不匹配时需另行设计重建。短期 v2 窗口旧版不可读，迁移不会自动清理源索引或覆盖原数据。启用事务归档或摘要后还须先完成相应检查点与任务格式核验，不应直接切换到 Redis 旧写路径。
