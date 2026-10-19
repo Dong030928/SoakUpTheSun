@@ -16,31 +16,45 @@ public final class SummaryModel {
     private final ChatClient client;
     private final SummaryPolicy policy;
     private final MemoryTokenBudget tokens;
+    private final org.hgc.suts.gateway.memory.profile.ProfileSummarySupport profiles;
     public SummaryModel(ChatModel model, SummaryPolicy policy) { this(model, policy, new MemoryTokenBudget()); }
     public SummaryModel(ChatModel model, SummaryPolicy policy, MemoryTokenBudget tokens) {
-        client = ChatClient.create(model); this.policy = policy; this.tokens = tokens;
+        this(model, policy, tokens, null);
+    }
+    public SummaryModel(ChatModel model, SummaryPolicy policy, MemoryTokenBudget tokens,
+                        org.hgc.suts.gateway.memory.profile.ProfileSummarySupport profiles) {
+        client = ChatClient.create(model); this.policy = policy; this.tokens = tokens; this.profiles = profiles;
     }
     public Result summarize(SummaryEvent event) {
         String input = input(event);
+        var profile = profiles == null ? null : profiles.prepare(event);
+        String instruction = profile == null ? INSTRUCTION : profile.instruction();
+        if (profile != null) input += "\n旧画像参考：\n" + profile.context();
         org.springframework.util.Assert.state(input.length() <= policy.current().getMaxInputChars()
-                        && tokens.text(input) + tokens.text(INSTRUCTION) + 64 <= policy.current().getInputBudgetTokens(),
+                        && tokens.text(input) + tokens.text(instruction) + 64 <= policy.current().getInputBudgetTokens(),
                 "Durable summary input no longer fits the configured model budget");
         var options = DeepSeekChatOptions.builder().disableThinking().temperature(0.0)
                 .maxTokens(policy.current().getSummaryMaxTokens());
-        var response = client.prompt().system(INSTRUCTION).user(input).options(options).call().chatResponse();
+        var response = client.prompt().system(instruction).user(input).options(options).call().chatResponse();
         String text = response == null || response.getResult() == null ? null : response.getResult().getOutput().getText();
+        org.springframework.util.Assert.state(response != null && !response.hasToolCalls() && text != null, "Summary output is missing or contains tools");
+        var parsed = profile == null ? null : profiles.parse(event, text);
+        if (parsed != null) text = parsed.summary();
         org.springframework.util.Assert.state(response != null && !response.hasToolCalls() && text != null && !text.isBlank()
                 && text.length() <= policy.current().getSummaryMaxChars(), "Summary output is empty or too long");
         var usage = response.getMetadata().getUsage();
         org.springframework.util.Assert.state(usage == null || usage.getCompletionTokens() == null
                 || usage.getCompletionTokens() <= policy.current().getSummaryMaxTokens(), "Summary output exceeds the token reserve");
-        tokens.observe(tokens.text(input) + tokens.text(INSTRUCTION) + 64, usage);
+        tokens.observe(tokens.text(input) + tokens.text(instruction) + 64, usage);
         return new Result(text, usage == null || usage.getPromptTokens() == null ? 0 : usage.getPromptTokens(),
-                usage == null || usage.getCompletionTokens() == null ? 0 : usage.getCompletionTokens());
+                usage == null || usage.getCompletionTokens() == null ? 0 : usage.getCompletionTokens(),
+                parsed == null ? null : parsed.payload(), parsed != null && parsed.rejected());
     }
     public static String input(SummaryEvent event) {
         return JsonMapper.builder().build().writeValueAsString(java.util.Map.of("previousSummary", event.previousSummary(),
                 "completeTurns", event.turns()));
     }
-    public record Result(String text, long promptTokens, long completionTokens) { }
+    public record Result(String text, long promptTokens, long completionTokens, String profilePayload, boolean profileRejected) {
+        public Result(String text, long promptTokens, long completionTokens) { this(text, promptTokens, completionTokens, null, false); }
+    }
 }

@@ -15,9 +15,14 @@ public final class JdbcSummaryJobs {
     private final TransactionTemplate transactions;
     private final int maxMessageBytes;
     private final String generation;
+    private final org.hgc.suts.gateway.memory.profile.ProfileSummarySupport profiles;
     public JdbcSummaryJobs(JdbcConversationArchive archive, int maxMessageBytes, String generation) {
+        this(archive, maxMessageBytes, generation, null);
+    }
+    public JdbcSummaryJobs(JdbcConversationArchive archive, int maxMessageBytes, String generation,
+                           org.hgc.suts.gateway.memory.profile.ProfileSummarySupport profiles) {
         jdbc = archive.jdbcOperations(); transactions = archive.transactionOperations();
-        this.maxMessageBytes = maxMessageBytes; this.generation = generation;
+        this.maxMessageBytes = maxMessageBytes; this.generation = generation; this.profiles = profiles;
     }
     public void register(SummaryEvent event) {
         String body = event.body(maxMessageBytes);
@@ -43,11 +48,25 @@ public final class JdbcSummaryJobs {
         });
     }
     public void saveResult(Job job, String result, long inputTokens, long outputTokens) {
+        saveResult(job, new SummaryModel.Result(result, inputTokens, outputTokens));
+    }
+    public void requireProfileCompatibility(Job job) {
+        Assert.state(profiles != null || jdbc.queryForObject("SELECT COUNT(*) FROM agent_profile_extraction "
+                        + "WHERE summary_job_id=? AND state IN ('CAPTURED','RESULT')", Long.class, job.id) == 0,
+                "Enable profile processing to resume structured summary jobs");
+    }
+    public void saveResult(Job job, SummaryModel.Result result) {
+        transactions.executeWithoutResult(status -> {
         int updated = jdbc.update("UPDATE agent_memory_job SET result_text = ?, state = 'RESULT', prompt_tokens = ?, "
                         + "completion_tokens = ?, updated_at = ? WHERE job_id = ? AND worker_epoch = ? AND lease_until > ? "
-                        + "AND state = 'READY'", result, inputTokens, outputTokens, System.currentTimeMillis(), job.id,
+                        + "AND state = 'READY'", result.text(), result.promptTokens(), result.completionTokens(), System.currentTimeMillis(), job.id,
                 job.worker, System.currentTimeMillis());
         Assert.state(updated == 1, "Summary worker lease expired before persisting its result");
+        if (result.profilePayload() != null) {
+            Assert.notNull(profiles, "Profile result processor is missing");
+            profiles.result(event(job), result.profilePayload(), result.profileRejected());
+        }
+        });
     }
     public void project(Job job, SummaryEvent event, String result) {
         transactions.executeWithoutResult(status -> {
@@ -76,6 +95,7 @@ public final class JdbcSummaryJobs {
             }
             jdbc.update("UPDATE agent_memory_job SET state = 'MERGED', updated_at = ? WHERE job_id = ?",
                     System.currentTimeMillis(), job.id);
+            if (profiles != null) profiles.merged(event);
         });
     }
     public void finish(Job job, String vectorState) {
@@ -84,8 +104,11 @@ public final class JdbcSummaryJobs {
                 + "updated_at = ? WHERE job_id = ? AND worker_epoch = ? AND lease_until > ?", vectorState);
     }
     public void stale(Job job) {
+        transactions.executeWithoutResult(status -> {
         updateFenced(job, "UPDATE agent_memory_job SET state = 'STALE', vector_state = ?, lease_until = 0, "
                 + "updated_at = ? WHERE job_id = ? AND worker_epoch = ? AND lease_until > ?", "OBSOLETE");
+        if (profiles != null) profiles.stale(job.id);
+        });
     }
     private void updateFenced(Job job, String sql, String value) {
         Assert.state(jdbc.update(sql, value, System.currentTimeMillis(), job.id, job.worker, System.currentTimeMillis()) == 1,

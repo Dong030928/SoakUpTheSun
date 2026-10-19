@@ -36,8 +36,9 @@ public class MemorySummaryConfiguration {
         return policy;
     }
     @Bean public MemoryTokenBudget memoryTokenBudget() { return new MemoryTokenBudget(); }
-    @Bean public JdbcSummaryJobs summaryJobs(JdbcConversationArchive archive, MemoryTransactionProperties tx) {
-        return new JdbcSummaryJobs(archive, tx.getMaxMessageBytes(), tx.getGeneration());
+    @Bean public JdbcSummaryJobs summaryJobs(JdbcConversationArchive archive, MemoryTransactionProperties tx,
+            ObjectProvider<org.hgc.suts.gateway.memory.profile.ProfileSummarySupport> profiles) {
+        return new JdbcSummaryJobs(archive, tx.getMaxMessageBytes(), tx.getGeneration(), profiles.getIfAvailable());
     }
     @Bean(destroyMethod = "close") public RedisSummaryStateStore summaryStates(StringRedisTemplate redis,
             RedisTransactionLedger ledger, MemoryTransactionProperties tx, MemoryProperties window, SummaryPolicy policy) {
@@ -48,8 +49,9 @@ public class MemorySummaryConfiguration {
             SummaryPolicy policy, MemoryTokenBudget tokens, ObjectProvider<RocketMqTransactionTransport> messaging, MemoryProperties window) {
         return new SummaryCoordinator(states, redis, ledger, archive, jobs, tx, policy, tokens, messaging::getObject, window);
     }
-    @Bean public SummaryModel summaryModel(ChatModel agentChatModel, SummaryPolicy policy, MemoryTokenBudget tokens) {
-        return new SummaryModel(agentChatModel, policy, tokens);
+    @Bean public SummaryModel summaryModel(ChatModel agentChatModel, SummaryPolicy policy, MemoryTokenBudget tokens,
+            ObjectProvider<org.hgc.suts.gateway.memory.profile.ProfileSummarySupport> profiles) {
+        return new SummaryModel(agentChatModel, policy, tokens, profiles.getIfAvailable());
     }
     @Bean public SummaryWorker summaryWorker(JdbcSummaryJobs jobs, JdbcConversationArchive archive, RedisSummaryStateStore states,
             SummaryCoordinator coordinator, SummaryPolicy policy, SummaryModel model, MemoryTransactionProperties tx, VectorStorageService vectors) {

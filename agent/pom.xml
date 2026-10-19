@@ -197,6 +197,24 @@
 
     <profiles>
         <profile>
+            <id>live-profile</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration><includes combine.children="append"><include>**/LiveProfileIT.java</include></includes></configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>rag-profile</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration><includes combine.children="append"><include>**/ProfileApplicationIT.java</include></includes></configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>live-memory-summary</id>
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>

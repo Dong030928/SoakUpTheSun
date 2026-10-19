@@ -67,7 +67,7 @@ public class ManagedMemoryVectorStore {
     }
 
     /** Verify RedisVectorStore's existing-index shortcut cannot hide a schema mismatch. */
-    static void validateSchema(Map<String, Object> info, String prefix, int dimension) {
+    public static void validateSchema(Map<String, Object> info, String prefix, int dimension) {
         Map<String, Object> definition = asMap(info.get("index_definition"));
         Assert.state("JSON".equalsIgnoreCase(string(definition.get("key_type"))), "Memory index must index JSON");
         Object prefixes = definition.get("prefixes");

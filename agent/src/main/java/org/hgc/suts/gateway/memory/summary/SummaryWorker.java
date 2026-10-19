@@ -40,6 +40,7 @@ public final class SummaryWorker implements SummaryMessaging.Handler {
         var job = jobs.claim(jobId, System.currentTimeMillis(), policy.current().getWorkerLeaseMs());
         if (job == null) return; // Another worker/explicit retry deadline owns it; the durable scanner will resume it.
         try {
+            jobs.requireProfileCompatibility(job);
             var event = jobs.event(job);
             if (states.read(event.conversationId()) == null) coordinator.recover(event.conversationId());
             if ("READY".equals(job.state())) {
@@ -52,7 +53,7 @@ public final class SummaryWorker implements SummaryMessaging.Handler {
                 states.fenceWorker(event, job.worker(), job.leaseUntil());
                 modelCalls.increment();
                 var result = model.summarize(event); // NO SQL transaction held here, and NO business tools.
-                jobs.saveResult(job, result.text(), result.promptTokens(), result.completionTokens());
+                jobs.saveResult(job, result);
                 job = jobs.read(job.id()).orElseThrow();
             }
             if ("RESULT".equals(job.state())) {
