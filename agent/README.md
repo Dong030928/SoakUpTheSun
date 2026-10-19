@@ -160,12 +160,65 @@ M03 与 M02 共用隔离基础设施，在 Java 17/21 CI 运行真实 Redis/MySQ
 
 ```sh
 bash agent/src/test/fixtures/memory-transactions/start.sh
-mvn -B -ntp -f agent/pom.xml verify -Pmemory-transactions,memory-summary \
+mvn -B -ntp -f agent/pom.xml verify -Pmemory-transactions,memory-summary,rag-profile \
   -Dmemory.transactions.fixture=agent-transactions-integration-only
 docker compose -f agent/src/test/fixtures/memory-transactions/compose.yaml down --volumes
 ```
 
 这些集成测试的模型和 Embedding 是替身。另有显式付费启用的三次真实模型检查，命令和验收边界见 [VALIDATION-M03.md](VALIDATION-M03.md)，不会在普通测试或 CI 读取私有 Key。
+
+## 长期用户画像
+
+画像默认关闭。启用后，M03 原有的无工具 `ChatClient` 在同一次异步摘要调用中，使用 Spring AI `BeanOutputConverter` 的结构化格式生成 `summaryText` 和 `profileChanges`。候选必须引用本次完整轮次中的用户原话；应用核对属性范围、长度、轮次、引用与归档 hash。助手推测和历史摘要不能单独作为画像来源。模型抽取仍可能判断错误，用户可独立查询与纠正。
+
+摘要正文和画像候选一起持久化，摘要仍以纯正文合并；确认摘要投影时，在同一数据库事务将画像阶段置为 READY。后续画像应用和 Redis 索引由独立有界 worker 恢复，不占用会话摘要槽位。索引故障只重试索引阶段；已有合格持久结果后不重新请求模型。模型返回到持久化前崩溃仍可能重试一次模型调用。
+
+先执行新增的 Flyway `V3__user_profile.sql`（使用既有迁移流程或受控的 `archive.migrate=true`），再统一部署处理实例。沿用已配置的 M01～M03 连接、事务 Topic、generation、预算和厂商 TTL，增加：
+
+```yaml
+suts:
+  ai:
+    memory:
+      profile:
+        enabled: true
+        accepting: true
+        vector-enabled: true
+```
+
+`profile.enabled` 要求 M03 摘要已启用。结构化输出格式、画像快照也计入摘要输入与输出预算；如原预算容纳不下，任务保留并明确失败，需调整经确认的预算，不会擅自增大水位或跳过校验。默认最多 12 个候选、100 个画像属性；旧画像参考最多 20 条/6000 字符，值最多 500 字符、引用最多 1000 字符。属性前缀默认 `preference/habit/device/accessibility/personal`，可通过 `attribute-prefixes` 配置。属性以独立事实存储，不将整个画像拼成一个会被覆盖的自由文本。
+
+画像 MySQL 状态为 ACTIVE、CONFLICT 或 DELETED，版本与来源单独追加保留。同会话后续原话可纠正旧值；跨会话不同值进入冲突，等待用户明确确认。直接纠正有 `expectedVersion` 和用户绑定的 `requestId`，防止并发覆盖与客户端重试重复执行。迟到任务不能降级用户已经确认的更正。
+
+画像 Redis 使用独立 HNSW 索引和前缀 `suts:agent:profile:*`；模型端点、模型名、维度及索引命名共同绑定投影目标。旧整轮/摘要索引保持兼容。检索在 TopK 前过滤用户和目标，返回前再查 MySQL 当前有效状态与版本；当前实现有界补召回，积累大量旧候选时仍可能少返回，需要排查投影清理积压。
+
+所有接口沿用 `token` 登录认证，不接受由请求指定其他用户：
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/agent/profile?includeInactive=false&limit=20` | 查询当前有效事实；开启 includeInactive 可查看冲突与遗忘状态 |
+| `GET /api/agent/profile/{factId}/versions?beforeVersion=...&limit=20` | 分页查询来源和历史版本 |
+| `POST /api/agent/profile/search` | Redis 向量查询，正文 `{"query":"饮品偏好","limit":5}` |
+| `POST /api/agent/profile/{factId}/correct` | 纠正/解决冲突或显式恢复已遗忘事实 |
+| `POST /api/agent/profile/{factId}/forget` | 使画像失效并登记向量清理 |
+| `GET /api/agent/profile/extractions?limit=20` | 查询本人抽取阶段和错误类型，不返回任务原文 |
+| `GET /api/agent/profile/{factId}/projections` | 查询向量投影进度 |
+| `POST /api/agent/profile/reindex` | 为本用户当前事实重建当前目标投影，并重驱动旧版清理 |
+
+纠正正文示例：`{"requestId":"correction-001","expectedVersion":1,"value":"绿茶","statement":"我确认喜欢绿茶"}`。statement 作为这次用户直接确认的来源，必须包含新值。遗忘正文示例：`{"requestId":"forget-001","expectedVersion":2,"statement":"忘掉我的饮品偏好"}`。同一 requestId 重试须复用原正文；过期版本返回业务码 409。列表和接口仍使用项目原有 Result 协议。
+
+“遗忘”在本模块指画像逻辑失效：MySQL 保留失效标记、版本和来源用于阻止旧任务复活，索引异步删除；不删除已归档原文、当前对话摘要、日志或备份。删除标记不会被后续自动抽取恢复，重新记录使用显式 correct 入口。历史版本中的状态表示当时状态，当前有效性始终以 fact 当前记录为准。
+
+抽取与投影状态在 `agent_profile_extraction/agent_profile_projection` 中持久保存，带 worker 代次、租约、重试时间和错误类型；网络调用不持有数据库事务。`profile.vector-enabled=false` 或关闭 Embedding 时，投影保留 PENDING，MySQL 查询/纠正仍可使用。切换模型、维度或索引命名后，重启并显式 reindex；旧目标状态不代表新目标已写入。
+
+停止新抽取先设 `profile.accepting=false`，保留 `enabled=true` 排空 CAPTURED/RESULT/READY 与投影。该配置需正常重载/重启，不提供配置管理接口。新二进制会拒绝在关闭画像支持时处理仍需结构化处理的旧任务；旧二进制没有这项保护，因此启用前应停流量、排空旧 worker、统一部署，不能混跑旧摘要消费者。回退保留 V3、事实版本和删除状态，不能靠删除 SQL 或 Redis Key 绕过。
+
+`rag-profile` 集成使用既有隔离 MySQL/Redis/RocketMQ，覆盖真实登录、HTTP 模型协议、画像持久化、HNSW、纠正/遗忘、跨用户过滤及 Embedding 故障恢复；模型和 Embedding 采用确定性替身。真实模型抽取是显式付费的独立检查，仅调用两次，使用合成对话与 H2 持久化：
+
+```powershell
+mvn -B -ntp -f agent/pom.xml verify -Plive-profile '-Dlive.profile=true' '-Dlive.memory.config=C:/path/outside/repository/agent-secrets.yaml'
+```
+
+脱敏的真实模型样例记录见 [profile-live-2026-10-19.json](evaluation/profile-live-2026-10-19.json)。本模块提供独立画像 API；按对话意图调用画像、文档混合检索和多模型路由在后续 PR 接入。
 
 ## 视觉上下文协议
 

@@ -1,0 +1,47 @@
+{
+  "testedAt" : "2026-10-19T03:02:45.611455500Z",
+  "model" : "deepseek-flash",
+  "calls" : 2,
+  "firstPromptTokens" : 733,
+  "firstCompletionTokens" : 102,
+  "secondPromptTokens" : 1227,
+  "secondCompletionTokens" : 161,
+  "facts" : [ {
+    "id" : "e4f9c758d561860ecb28b38eb05d9cce3a867bb23b7e4a2033992f66c6912bcb",
+    "userId" : 42,
+    "attribute" : "preference.drink",
+    "version" : 2,
+    "state" : "ACTIVE",
+    "value" : "喜欢红茶，不再喜欢绿茶",
+    "source" : {
+      "kind" : "SUMMARY",
+      "conversationId" : "user:42:f58328470ee3f22c3929e75dcca3a8e1cd32d920945666fa88c4a8fa6adc3254",
+      "epoch" : 1,
+      "sequence" : 2,
+      "quote" : "更正一下，我现在喜欢红茶，不再喜欢绿茶。",
+      "payloadHash" : "8812f301bb4432287c662503a0020182ae737e5a7f771f886ee07ec4d2e0631a",
+      "occurredAt" : 1792378964387,
+      "jobId" : "77a617c6046684e968a75efb23677165de1375031c968f41d12ba5e91bae7b3b"
+    },
+    "updatedAt" : 1792378965605
+  }, {
+    "id" : "ec29f8ba109ddeafc891fbeab29e8d07c5d6c0fa52e63e163f9c86afeae35dc6",
+    "userId" : 42,
+    "attribute" : "device.screen_reader",
+    "version" : 1,
+    "state" : "ACTIVE",
+    "value" : "NVDA",
+    "source" : {
+      "kind" : "SUMMARY",
+      "conversationId" : "user:42:f58328470ee3f22c3929e75dcca3a8e1cd32d920945666fa88c4a8fa6adc3254",
+      "epoch" : 1,
+      "sequence" : 1,
+      "quote" : "我使用的屏幕阅读器是 NVDA。",
+      "payloadHash" : "fccd8842716fb670177ffb23a398ca3db281d4cadf47de690f4d595e468078b4",
+      "occurredAt" : 1792378962956,
+      "jobId" : "a583253788d533a31ef16f5b5fce1f73fc00278954ad56b13d663ade3bb29011"
+    },
+    "updatedAt" : 1792378964370
+  } ],
+  "elapsedMs" : 2604
+}
