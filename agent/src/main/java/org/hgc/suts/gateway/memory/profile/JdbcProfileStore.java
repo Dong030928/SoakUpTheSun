@@ -19,13 +19,24 @@ public final class JdbcProfileStore {
     private final TransactionTemplate transactions;
     private final MemoryProfileProperties config;
     private final String target;
+    private final Set<String> projectionTargets;
     private final int maxMessageBytes;
     private final String generation;
 
     public JdbcProfileStore(JdbcConversationArchive archive, MemoryProfileProperties config, String target,
                             int maxMessageBytes, String generation) {
+        this(archive, config, target, maxMessageBytes, generation, Set.of());
+    }
+
+    public JdbcProfileStore(JdbcConversationArchive archive, MemoryProfileProperties config, String target,
+                            int maxMessageBytes, String generation, Set<String> additionalTargets) {
         this.jdbc = archive.jdbcOperations(); this.transactions = archive.transactionOperations();
         this.config = config; this.target = target; this.maxMessageBytes = maxMessageBytes; this.generation = generation;
+        var targets = new TreeSet<String>(); targets.add(target);
+        Assert.notNull(additionalTargets, "Additional profile projection targets are required");
+        targets.addAll(additionalTargets);
+        targets.forEach(JdbcProfileStore::validateTarget);
+        this.projectionTargets = Collections.unmodifiableSet(targets);
         config.validate();
         jdbc.queryForObject("SELECT COUNT(*) FROM agent_profile_user WHERE 1 = 0", Long.class);
     }
@@ -257,39 +268,50 @@ public final class JdbcProfileStore {
                 + "VALUES (?,?,?,?,?,?,?,?)", id, user, attribute, version, state, value, json(source), now);
         // Wake old-version cleanup and fence workers that were writing obsolete versions.
         jdbc.update("UPDATE agent_profile_projection SET state='PENDING',lease_until=0,retry_at=0,worker_epoch=worker_epoch+1,updated_at=? WHERE fact_id=?", now, id);
-        enqueue(id, user, version);
+        for (String projectionTarget : projectionTargets) enqueue(id, user, version, projectionTarget);
         return new Fact(id, user, attribute, version, state, value, source, now);
     }
 
-    private void enqueue(String fact, long user, long version) {
-        String id = SummaryPolicy.hash(fact + "|" + version + "|" + target);
+    private void enqueue(String fact, long user, long version, String projectionTarget) {
+        String id = SummaryPolicy.hash(fact + "|" + version + "|" + projectionTarget);
         try {
             jdbc.update("INSERT INTO agent_profile_projection (projection_id,fact_id,user_id,fact_version,target_tag,state,updated_at) "
-                    + "VALUES (?,?,?,?,?,'PENDING',?)", id, fact, user, version, target, System.currentTimeMillis());
+                    + "VALUES (?,?,?,?,?,'PENDING',?)", id, fact, user, version, projectionTarget, System.currentTimeMillis());
         } catch (DuplicateKeyException duplicate) {
             jdbc.update("UPDATE agent_profile_projection SET state='PENDING',retry_at=0,updated_at=? WHERE projection_id=?",
                     System.currentTimeMillis(), id);
         }
     }
     public int reindex(long user) {
+        return reindex(user, target);
+    }
+    public int reindex(long user, String projectionTarget) {
         owner(user);
+        requireTarget(projectionTarget);
         return transactions.execute(status -> {
             ensureUser(user); lockUser(user);
             var facts = list(user, true, config.getMaxFacts());
-            for (Fact fact : facts) enqueue(fact.id(), user, fact.version());
+            for (Fact fact : facts) enqueue(fact.id(), user, fact.version(), projectionTarget);
             jdbc.update("UPDATE agent_profile_projection SET state='PENDING',retry_at=0,updated_at=? WHERE user_id=? AND target_tag=?",
-                    System.currentTimeMillis(), user, target);
+                    System.currentTimeMillis(), user, projectionTarget);
             return facts.size();
         });
     }
     public Projection claimProjection(String id) {
+        return claimProjection(id, target, config.getWorkerLeaseMs());
+    }
+    public Projection claimProjection(String id, String projectionTarget) {
+        return claimProjection(id, projectionTarget, config.getWorkerLeaseMs());
+    }
+    public Projection claimProjection(String id, String projectionTarget, long leaseMs) {
+        requireTarget(projectionTarget); Assert.isTrue(leaseMs >= 1000, "Invalid profile projection lease");
         return transactions.execute(status -> {
             var rows = projections(" WHERE projection_id=? FOR UPDATE", id);
             if (rows.isEmpty()) return null;
             var row = rows.get(0); long now = System.currentTimeMillis();
-            if (!row.target().equals(target) || !row.state().equals("PENDING") || row.leaseUntil() > now) return null;
+            if (!row.target().equals(projectionTarget) || !row.state().equals("PENDING") || row.leaseUntil() > now) return null;
             int changed = jdbc.update("UPDATE agent_profile_projection SET worker_epoch=worker_epoch+1,lease_until=?,attempts=attempts+1,updated_at=? "
-                    + "WHERE projection_id=? AND retry_at<=?", now + config.getWorkerLeaseMs(), now, id, now);
+                    + "WHERE projection_id=? AND retry_at<=?", now + leaseMs, now, id, now);
             return changed == 1 ? projections(" WHERE projection_id=?", id).get(0) : null;
         });
     }
@@ -300,12 +322,36 @@ public final class JdbcProfileStore {
                 row.worker(), System.currentTimeMillis()) == 1, "Stale profile projection worker");
     }
     public void retryProjection(Projection row, RuntimeException failure) {
+        retryProjection(row, failure, config.getRetryDelayMs());
+    }
+    public void retryProjection(Projection row, RuntimeException failure, long delayMs) {
+        Assert.isTrue(delayMs > 0, "Invalid profile projection retry delay");
         jdbc.update("UPDATE agent_profile_projection SET lease_until=0,retry_at=?,last_error=?,updated_at=? WHERE projection_id=? AND worker_epoch=?",
-                System.currentTimeMillis() + config.getRetryDelayMs(), failure.getClass().getSimpleName(), System.currentTimeMillis(), row.id(), row.worker());
+                System.currentTimeMillis() + delayMs, failure.getClass().getSimpleName(), System.currentTimeMillis(), row.id(), row.worker());
+    }
+    /** A late write may outlive a newer worker's completed cleanup; reopen only its obsolete projection. */
+    public boolean recoverObsoleteProjection(Projection row, RuntimeException failure, long delayMs) {
+        owner(row.userId()); id(row.factId()); requireTarget(row.target());
+        Assert.isTrue(delayMs > 0, "Invalid profile projection recovery delay");
+        return transactions.execute(status -> {
+            ensureUser(row.userId()); lockUser(row.userId());
+            var current = fact(row.userId(), row.factId());
+            if (current.isPresent() && "ACTIVE".equals(current.get().state()) && current.get().version() == row.version()) return false;
+            long now = System.currentTimeMillis();
+            // Deliberately fence any newer cleanup worker: its remote delete may have preceded this late write.
+            return jdbc.update("UPDATE agent_profile_projection SET state='PENDING',lease_until=0,retry_at=?,"
+                            + "worker_epoch=worker_epoch+1,last_error=?,updated_at=? WHERE projection_id=? AND target_tag=? "
+                            + "AND fact_id=? AND user_id=? AND fact_version=?", now + delayMs, failure.getClass().getSimpleName(), now,
+                    row.id(), row.target(), row.factId(), row.userId(), row.version()) == 1;
+        });
     }
     public List<Projection> projectionStatus(long user, String id) {
+        return projectionStatus(user, id, target);
+    }
+    public List<Projection> projectionStatus(long user, String id, String projectionTarget) {
         owner(user); id(id);
-        return projections(" WHERE user_id=? AND fact_id=? AND target_tag=? ORDER BY fact_version DESC LIMIT 100", user, id, target);
+        requireTarget(projectionTarget);
+        return projections(" WHERE user_id=? AND fact_id=? AND target_tag=? ORDER BY fact_version DESC LIMIT 100", user, id, projectionTarget);
     }
     private List<Projection> projections(String suffix, Object... args) {
         return jdbc.query("SELECT projection_id,fact_id,user_id,fact_version,target_tag,state,worker_epoch,lease_until FROM agent_profile_projection" + suffix,
@@ -324,10 +370,68 @@ public final class JdbcProfileStore {
                 (rs, i) -> new ExtractionStatus(rs.getString(1), rs.getString(2), rs.getLong(3), rs.getLong(4), rs.getString(5), rs.getLong(6)), user, limit);
     }
     public List<String> pendingProjections() {
+        return pendingProjections(target, config.getScanBatch());
+    }
+    public List<String> pendingProjections(String projectionTarget, int limit) {
+        requireTarget(projectionTarget); Assert.isTrue(limit > 0 && limit <= 100, "Invalid profile projection batch");
         long now = System.currentTimeMillis();
         return jdbc.query("SELECT projection_id FROM agent_profile_projection WHERE target_tag=? AND state='PENDING' AND lease_until<=? AND retry_at<=? "
-                + "ORDER BY updated_at,projection_id LIMIT ?", (rs, i) -> rs.getString(1), target, now, now, config.getScanBatch());
+                + "ORDER BY updated_at,projection_id LIMIT ?", (rs, i) -> rs.getString(1), projectionTarget, now, now, limit);
     }
+
+    /** SQL-only keyset pages atomically enqueue current facts and checkpoint progress. */
+    public int backfillPage(String projectionTarget, int limit) {
+        requireTarget(projectionTarget); Assert.isTrue(limit > 0 && limit <= 100, "Invalid profile backfill batch");
+        return transactions.execute(status -> {
+            ensureBackfill(projectionTarget);
+            var checkpoint = backfillStatus(projectionTarget, true);
+            if (checkpoint.completed()) return 0;
+            var facts = jdbc.query("SELECT fact_id,user_id,attribute_key,fact_version,state,value_text,source_json,updated_at "
+                            + "FROM agent_profile_fact WHERE fact_id>? ORDER BY fact_id LIMIT ?",
+                    (rs, i) -> readFact(rs), checkpoint.lastFactId(), limit);
+            long now = System.currentTimeMillis();
+            for (Fact fact : facts) {
+                // Also recover cleanup of historical documents in a retained/rebuilt keyword index.
+                jdbc.update("UPDATE agent_profile_projection SET state='PENDING',lease_until=0,retry_at=0,"
+                                + "worker_epoch=worker_epoch+1,updated_at=? WHERE fact_id=? AND target_tag=?",
+                        now, fact.id(), projectionTarget);
+                enqueue(fact.id(), fact.userId(), fact.version(), projectionTarget);
+            }
+            String cursor = facts.isEmpty() ? checkpoint.lastFactId() : facts.get(facts.size() - 1).id();
+            jdbc.update("UPDATE agent_profile_backfill SET last_fact_id=?,completed=?,updated_at=? WHERE target_tag=?",
+                    cursor, facts.isEmpty(), now, projectionTarget);
+            return facts.size();
+        });
+    }
+    public void resetBackfill(String projectionTarget) {
+        requireTarget(projectionTarget);
+        transactions.executeWithoutResult(status -> {
+            ensureBackfill(projectionTarget); backfillStatus(projectionTarget, true);
+            jdbc.update("UPDATE agent_profile_backfill SET last_fact_id='',completed=FALSE,updated_at=? WHERE target_tag=?",
+                    System.currentTimeMillis(), projectionTarget);
+        });
+    }
+    public BackfillStatus backfillStatus(String projectionTarget) {
+        requireTarget(projectionTarget);
+        return transactions.execute(status -> { ensureBackfill(projectionTarget); return backfillStatus(projectionTarget, false); });
+    }
+    private BackfillStatus backfillStatus(String projectionTarget, boolean lock) {
+        return jdbc.queryForObject("SELECT target_tag,last_fact_id,completed FROM agent_profile_backfill WHERE target_tag=?"
+                        + (lock ? " FOR UPDATE" : ""),
+                (rs, i) -> new BackfillStatus(rs.getString(1), rs.getString(2), rs.getBoolean(3)), projectionTarget);
+    }
+    private void ensureBackfill(String projectionTarget) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM agent_profile_backfill WHERE target_tag=?", Long.class, projectionTarget) == 0)
+            try { jdbc.update("INSERT INTO agent_profile_backfill (target_tag,last_fact_id,completed,updated_at) VALUES (?,'',FALSE,?)",
+                    projectionTarget, System.currentTimeMillis()); } catch (DuplicateKeyException ignored) { }
+    }
+    private void requireTarget(String projectionTarget) {
+        Assert.isTrue(projectionTargets.contains(projectionTarget), "Unknown profile projection target");
+    }
+    private static void validateTarget(String projectionTarget) {
+        Assert.isTrue(projectionTarget != null && projectionTarget.matches("[a-zA-Z0-9:_-]{1,64}"), "Invalid profile projection target");
+    }
+    public record BackfillStatus(String target, String lastFactId, boolean completed) { }
     private long count(long user) { return jdbc.queryForObject("SELECT COUNT(*) FROM agent_profile_fact WHERE user_id=?", Long.class, user); }
     private void ensureUser(long user) {
         owner(user);

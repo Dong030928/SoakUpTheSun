@@ -234,6 +234,77 @@ mvn -B -ntp -f agent/pom.xml verify -Plive-profile '-Dlive.profile=true' '-Dlive
 
 脱敏的真实模型样例记录见 [profile-live-2026-10-19.json](evaluation/profile-live-2026-10-19.json)。本模块提供独立画像 API；按对话意图调用画像、文档混合检索和多模型路由在后续 PR 接入。
 
+## 文档与混合检索
+
+R02 提供独立检索引擎，默认 `suts.ai.rag.enabled=false`。接收原问题、检索问题、范围和可选文档 ID；查询改写、意图判断和聊天模型路由由后续 Agent 接入完成。支持 `PROFILE`、`DOCUMENT`、`BOTH`、`NONE`；`NONE` 不调用检索和模型。画像沿用上面的 R01 开关，文档检索无需开启会话归档、摘要或 RocketMQ。
+
+链路为并行向量/关键词检索 → 每路最多 50 条 → RRF Top20 → 精排 Top5 → 父块扩展去重与来源。`BOTH` 每路默认画像 10 条、文档 40 条，余量互补；`profile-quota` 与 `document-quota` 可配置且相加为 50。实现对每类有界取最多 50 条后分配共享配额，因此内部取数最多 100 条/通道，进入 RRF 前最多 50 条/通道。一次请求只生成一次查询 Embedding，两类 Redis 索引复用该向量。ES 使用内置 CJK 分词与 BM25。精排默认硅基流动 `Qwen/Qwen3-Reranker-0.6B`，地址和模型可替换。
+
+私有配置示例（Key 与数据库口令放在仓库外）：
+
+```yaml
+suts:
+  ai:
+    rag:
+      enabled: true
+      jdbc-url: jdbc:mysql://127.0.0.1:3306/agent_rag
+      username: your_user
+      password: your_password
+      migrate: false
+      elasticsearch:
+        endpoint: http://127.0.0.1:9200
+        index-name: suts-agent-rag-v1
+        username: your_es_user
+        password: your_es_password
+      reranker:
+        endpoint: https://api.siliconflow.cn/v1
+        api-key: your_api_key
+        model: Qwen/Qwen3-Reranker-0.6B
+```
+
+Embedding 沿用 `suts.ai.embedding-*` 和维度配置。先通过受控迁移执行 `db/rag/V1__rag_documents.sql`，或首次部署显式 `rag.migrate=true`；使用独立 `agent_rag_schema_history`，与其他表同库时从版本 0 建立迁移基线后执行 V1。所有已开启会话归档的部署升级时均需先应用 `db/archive/V4__profile_keyword_projection.sql`，因为归档启动会校验整个迁移目录。升级前排空旧 worker，避免不识别 ES target 的旧实例参与。现有有效画像通过持久检查点回填到 ES；纠正、冲突及遗忘与独立 ES 投影任务在同一 SQL 事务入队。
+
+本地管理命令只在 `web-application-type=none` 下运行，使用操作人员的数据库/索引权限。支持 UTF-8 TXT、Markdown、可提取文本的 PDF，不含 OCR。默认文件上限 10 MiB、正文 50 万字符、父块 4000 字符、子块 1000 字符、重叠 120 字符；这是存储预算，不代表模型 Token。保留 Markdown 编号/标题、PDF 物理页码，父子块 ID 稳定。不要把敏感本机路径作为公共来源，默认只返回文件名。
+
+```sh
+java -jar agent/target/agent-0.0.1-SNAPSHOT.jar \
+  --spring.main.web-application-type=none \
+  --spring.cloud.nacos.discovery.enabled=false \
+  --spring.config.additional-location=file:/path/outside/repository/agent-secrets.yaml \
+  --suts.ai.rag.management.enabled=true \
+  --suts.ai.rag.management.action=import \
+  --suts.ai.rag.management.file=/path/guide.md \
+  --suts.ai.rag.management.document-id=screen-reader-guide \
+  --suts.ai.rag.management.owner-id=42 \
+  --suts.ai.rag.management.visibility=PUBLIC
+```
+
+`visibility` 默认 `OWNER`，显式 `PUBLIC` 才供其他登录用户召回。管理命令不提供 HTTP 上传入口。相同文档 ID 绑定原 owner，重复相同内容不创建版本。`action=status/delete/reindex` 携带同一 `document-id/owner-id`；`reindex` 强制重建当前索引，`retry` 处理一批持久积压，`profile-backfill` 重置画像 ES 回填。命令退出后的未完成任务在正常启用 RAG 的服务进程恢复。索引故障在 SQL 保留状态、租约、重试时间和错误类型。
+
+```http
+POST /api/agent/rag/search
+token: <登录 token>
+Content-Type: application/json
+
+{"originalQuestion":"这个怎么打开？","query":"演示读屏终端如何打开帮助文档？","scope":"BOTH","documentIds":[]}
+```
+
+身份从登录上下文读取；请求不能指定别人的 owner。返回 `evidence` 和 `trace`，包含父块正文、来源、版本、页码和命中子块 ID；Top5 指精排的片段数，父块合并后证据可能更少。证据正文总预算默认 12000 字符，超过预算跳过整个父块。ACL 在两引擎 TopK 前过滤，结果及父块再次按 MySQL 当前有效版本复核；SQL 故障不以索引正文代替权威记录。调用方应将这些正文视为引用数据，不能当作系统指令。
+
+Redis 或 ES 单路失败时使用仍可用的一路；精排失败回退 RRF 顺序最多 5 条，并在 `trace.degradedChannels` 明确标记。SQL/查询/精排共享总时间预算，超时返回已确认的证据或空列表及降级标记。取消不保证底层 SQL 或网络立刻结束，连接与读取仍有独立超时，执行池及队列有界。
+
+双索引写入先保持不可检索，分别记录 receipt 后再发布 SQL 版本、开放召回；这个过程可重试，不是 Redis/ES/MySQL 跨库原子事务，切换期间可能短暂少召回。旧版/遗忘/删除记录即使物理清理暂时失败也不能通过 SQL 复核。切换目标保留旧目标描述符与清理任务；更换 ES 地址时，旧地址清理需使用其原连接配置，当前凭据不会自动发送到另一个地址。历史正文与向量缓存保留用于重建，逻辑下架不会物理删除备份。
+
+普通 CI 使用真实隔离 MySQL、Redis HNSW、ES 和本地模型协议替身：
+
+```sh
+bash agent/src/test/fixtures/rag-retrieval/start.sh
+mvn -B -ntp -f agent/pom.xml verify -Prag-retrieval -Drag.retrieval.fixture=agent-rag-integration-only
+bash agent/src/test/fixtures/rag-retrieval/stop.sh
+```
+
+真实供应商检查单独显式启用 `-Plive-rag-retrieval -Dlive.rag=true -Drag.retrieval.fixture=agent-rag-integration-only -Dlive.memory.config=/path/outside/repository/agent-secrets.yaml`，仅一次批量 Embedding 和一次精排，使用合成演示资料。结果写到忽略的 `target/live-rag-report.json`；少量样例只证明可调用，不代表正式资料集的检索质量。用户画像和助盲资料的完整意图路由仍需后续 PR。
+
 ## 视觉上下文协议
 
 Picture 与 Agent 均使用 `REDIS_HOST/REDIS_PORT/REDIS_PASSWORD`，默认相同的本机 Redis；部署时必须指定为同一 Redis 实例和数据库。Picture 的 `VISION_QA_URL` 默认 `/vision-qa/qa`，与 Python 当前 multipart 路由一致。

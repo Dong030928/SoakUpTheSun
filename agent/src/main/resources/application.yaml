@@ -44,6 +44,24 @@ suts:
     # 其他设置
     timeout: ${AI_TIMEOUT:60000}
     temperature: 0.5
+    # Independent R02 retrieval; profile memory is optional for document-only queries.
+    rag:
+      enabled: ${AI_RAG_ENABLED:false}
+      jdbc-url: ${AI_RAG_JDBC_URL:}
+      username: ${AI_RAG_USERNAME:}
+      password: ${AI_RAG_PASSWORD:}
+      migrate: ${AI_RAG_MIGRATE:false}
+      profile-quota: ${AI_RAG_PROFILE_QUOTA:10}
+      document-quota: ${AI_RAG_DOCUMENT_QUOTA:40}
+      elasticsearch:
+        endpoint: ${AI_RAG_ES_ENDPOINT:http://127.0.0.1:9200}
+        index-name: ${AI_RAG_ES_INDEX:suts-agent-rag-v1}
+        username: ${AI_RAG_ES_USERNAME:}
+        password: ${AI_RAG_ES_PASSWORD:}
+      reranker:
+        endpoint: ${AI_RAG_RERANK_ENDPOINT:https://api.siliconflow.cn/v1}
+        api-key: ${AI_RAG_RERANK_API_KEY:}
+        model: ${AI_RAG_RERANK_MODEL:Qwen/Qwen3-Reranker-0.6B}
     # 向量维度
     vector:
       # 必须与当前 Embedding 模型及既有 Redis 索引一致
