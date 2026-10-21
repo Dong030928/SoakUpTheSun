@@ -18,7 +18,14 @@ public class MemoryProfileConfiguration {
     @Bean public JdbcProfileStore profileStore(JdbcConversationArchive archive, MemoryProfileProperties config, AiConfig ai,
                                                MemoryTransactionProperties tx, Environment environment) {
         Assert.state(environment.getProperty("suts.ai.memory.summary.enabled", Boolean.class, false), "Profiles require enabled M03 summary memory");
-        return new JdbcProfileStore(archive, config, ProfileVectorIndex.target(ai, config), tx.getMaxMessageBytes(), tx.getGeneration());
+        java.util.Set<String> additionalTargets = java.util.Set.of();
+        if (environment.getProperty("suts.ai.rag.enabled", Boolean.class, false)) {
+            var rag = org.springframework.boot.context.properties.bind.Binder.get(environment)
+                    .bind("suts.ai.rag", RagProperties.class).orElseGet(RagProperties::new);
+            rag.validate();
+            additionalTargets = java.util.Set.of(ProfileKeywordWorker.target(rag));
+        }
+        return new JdbcProfileStore(archive, config, ProfileVectorIndex.target(ai, config), tx.getMaxMessageBytes(), tx.getGeneration(), additionalTargets);
     }
     @Bean public ProfileSummarySupport profileSummarySupport(JdbcProfileStore profiles, MemoryProfileProperties config) {
         return new ProfileSummarySupport(profiles, config);

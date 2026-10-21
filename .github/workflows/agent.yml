@@ -16,6 +16,35 @@ permissions:
   contents: read
 
 jobs:
+  verify-rag-retrieval:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+          cache-dependency-path: agent/pom.xml
+      - name: Start isolated RAG search engines
+        run: bash agent/src/test/fixtures/rag-retrieval/start.sh
+      - name: Verify hybrid retrieval and document publication
+        run: mvn -B -ntp -f agent/pom.xml verify -Prag-retrieval -Drag.retrieval.fixture=agent-rag-integration-only
+      - name: Stop isolated RAG fixtures
+        if: always()
+        run: bash agent/src/test/fixtures/rag-retrieval/stop.sh
+      - name: Upload RAG test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-rag-retrieval-java-${{ matrix.java }}
+          path: |
+            agent/target/surefire-reports/
+            agent/target/failsafe-reports/
   verify-memory-transactions:
     runs-on: ubuntu-latest
     strategy:

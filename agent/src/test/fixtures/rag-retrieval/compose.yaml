@@ -1,0 +1,42 @@
+name: suts-agent-rag-retrieval-it
+services:
+  mysql:
+    image: mysql:8.0.46
+    environment:
+      MYSQL_ROOT_PASSWORD: agent-rag-integration-only
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: agent_rag_it
+    ports: ["127.0.0.1:13326:3306"]
+    volumes: ["./mysql-init.sql:/docker-entrypoint-initdb.d/fixture.sql:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=agent-rag-integration-only mysql -h127.0.0.1 -uroot agent_rag_it -e 'SELECT 1'"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+    mem_limit: 768m
+  redis:
+    image: redis:8.2.1
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--requirepass", "agent-rag-integration-only"]
+    ports: ["127.0.0.1:16393:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "agent-rag-integration-only", "PING"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+    mem_limit: 384m
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
+    environment:
+      cluster.name: suts-agent-rag-retrieval-it
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.ml.enabled: "false"
+      node.store.allow_mmap: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports: ["127.0.0.1:19200:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 3 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s' >/dev/null"]
+      interval: 3s
+      timeout: 4s
+      retries: 90
+    mem_limit: 1g

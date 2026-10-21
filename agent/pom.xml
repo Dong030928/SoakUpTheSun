@@ -83,6 +83,10 @@
         </dependency>
         <dependency>
             <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-pdf-document-reader</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-model-chat-memory-repository-jdbc</artifactId>
         </dependency>
         <dependency>
@@ -197,6 +201,24 @@
 
     <profiles>
         <profile>
+            <id>live-rag-retrieval</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration><includes combine.children="append"><include>**/LiveRagRetrievalIT.java</include></includes></configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>rag-retrieval</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration><includes combine.children="append"><include>**/RagSearchEnginesIT.java</include><include>**/RagApplicationIT.java</include></includes></configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>live-profile</id>
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -257,7 +279,7 @@
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
-                <configuration><includes combine.children="append"><include>**/MysqlArchiveIT.java</include></includes></configuration>
+                <configuration><includes combine.children="append"><include>**/MysqlArchiveIT.java</include><include>**/MysqlDocumentStoreIT.java</include></includes></configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
         </profile>
